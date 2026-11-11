@@ -220,7 +220,8 @@ class Runtime:
             # a fixture is the whole dataset — no pagination
             self.stats["verbs"] += 1
             return body.get("results", body) if isinstance(body, dict) else body
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        req = urllib.request.Request(url, headers={"Accept": "application/json",
+            "User-Agent": kw.get("ua", "AGSH/0.3 (agent; +https://github.com/Bumbu-indomie13/AGSH-)")})
         try:
             with urllib.request.urlopen(req, timeout=15) as r:
                 body = json.loads(r.read().decode())
@@ -358,12 +359,13 @@ class Runtime:
         raise AGSHError("guard", "unsupported guard", got=subject)
 
     def v_let(self, data, subject, kw):
-        """let NAME — bind current pipeline data to a named variable."""
+        """let NAME — bind current pipeline data to a named variable (data flows through)."""
         self.stats["verbs"] += 1
         if not re.fullmatch(r"[A-Za-z_]\w*", subject or ""):
             raise AGSHError("let", "variable name must be [A-Za-z_]word", got=subject)
         self.vars[subject] = data
-        return {"bound": subject, "type": type(data).__name__}
+        self.stats.setdefault("bound", []).append(subject)
+        return data  # pass-through: a let in the middle of a pipeline must not break the flow
 
     def v_take(self, data, subject, kw):
         """take NAME — replace pipeline data with a previously bound variable."""
@@ -574,8 +576,9 @@ class Runtime:
                                     got=sorted(it.keys()))
         # actually perform the POST
         body = body.encode()
-        req = urllib.request.Request(subject, data=body, method="POST",
-            headers={"Content-Type": "application/json", "Accept": "application/json"})
+        hdrs = {"Content-Type": "application/json", "Accept": "application/json",
+                "User-Agent": kw.get("ua", "AGSH/0.3 (agent; +https://github.com/Bumbu-indomie13/AGSH-)")}
+        req = urllib.request.Request(subject, data=body, method="POST", headers=hdrs)
         try:
             with urllib.request.urlopen(req, timeout=15) as r:
                 status, resp = r.status, r.read().decode()[:500]

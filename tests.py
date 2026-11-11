@@ -415,6 +415,13 @@ o = parse_out(p)
 check("fetch over rate limit -> structured error", o and "error" in o
       and "rate limit exceeded" in o["error"]["message"], f"out={o}")
 
+p = run_script('read data.json\n| let users\n| filter q=a\n| let active\n| write out2.json\n| take users\n| assert count==2\n', d)
+o = parse_out(p)
+written = json.load(open(os.path.join(d, "out2.json"))) if os.path.exists(os.path.join(d, "out2.json")) else None
+check("let pass-through: data flows through let + take restores original",
+      o and "error" not in o and written == [{"n": 1, "q": "a"}], f"out={o}")
+os.remove(os.path.join(d, "out2.json"))
+
 # --- cleanup report ---
 print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 for name, det in FAIL:

@@ -84,11 +84,11 @@ The intended loop: agent runs `--plan`, shows the risk summary to the user, gets
 - `resume FILE` — restores a world-state in a **new session** (recreates/deletes tracked files, restores pipeline data).
 
 ### let / take — named state
-`let NAME` — bind pipeline data saat ini ke variabel. `take NAME` — ganti pipeline data dengan isi variabel. Memungkinkan multi-branch pipeline dalam satu eksekusi:
+`let NAME` — bind pipeline data saat ini ke variabel, **data diteruskan** (pass-through, pipeline tetap mengalir). `take NAME` — ganti pipeline data dengan isi variabel. Multi-branch dalam satu eksekusi:
 ```
-read data.json | let users
-read cfg.json | get meta.total
-take users | filter status=active
+read data.json | let users | filter status=active | let active
+| read cfg.json | get meta.total
+| take active | write active.json
 ```
 
 ### get — nested path access
