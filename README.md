@@ -60,6 +60,18 @@ python3 tests.py   # 25 checks: edge cases, path sandbox, undo semantics, 10k-ro
 
 See [SPEC.md](SPEC.md) for the full grammar and [examples/](examples/).
 
+## Related work
+
+| Project | Idea | What AGSH adds |
+|---|---|---|
+| [smolagents](https://github.com/huggingface/smolagents) (HF) | Agents write actions as Python code (30% fewer steps than JSON tool-calls) | AGSH is a *narrow sub-language* for the 80% orchestration: fewer tokens than full Python, deterministic interpreter, no arbitrary-code risk by default |
+| [MAPL](https://github.com/orielhaim/MAPL) | Compact non-Turing-complete program emitted in one call, deterministic runtime | MAPL is a theoretical proposal (special-token encoding); AGSH runs today on stock models, with measured numbers (125→37 tokens) and a verified LLM round-trip (3/3, no fine-tuning) |
+| [AgentScript](https://github.com/vinodhalaharvi/agentscript) | S-expression pipeline DSL chaining AI + 100+ commands | AGSH keeps a 16-verb surface optimized for LLM transfer learning (shell/SQL/lodash semantics) and adds runtime feedback primitives |
+| [AgentDSL](https://github.com/halidrauf/AgentDSL) | Token-efficient delimiter format for agent-to-agent payloads | AgentDSL saves tokens in *messages*; AGSH saves tokens in *execution* — plus delta-feedback, undo, and permission gates |
+| [StepArgsDSL](https://github.com/sika7/StepArgsDSL) | Key-value intermediate representation for tool calls | StepArgsDSL stops at parsing; AGSH executes, verifies (guard/assert), and rolls back |
+
+The combination AGSH offers — **compact programs whose runtime returns delta-feedback, structured recovery hints, and undoable mutations, behind an informed-permission plan** — is not present in any of the above.
+
 ## Status
 
 Prototype (~450 lines, stdlib-only Python). All five "unsolved layers" now have first-class answers: cross-session world-state (`checkpoint save=` / `resume`), real API-call undo (`post ... undo_method=DELETE undo_url=...` verified against a live server), informed permission model (`--plan` risk aggregation + `--allow-run`/`--approve` flags), gated+restricted `run`, and `ask` human-gating (exit code 2). Not yet: multi-user audit log, per-verb rate limiting.
