@@ -264,6 +264,22 @@ class Runtime:
         self.stats["verbs"] += 1
         if not isinstance(data, list):
             raise AGSHError("filter", "input must be a list", got=type(data).__name__)
+        # relational form: filter FIELD>NUM (also >= < <=) — numeric compare,
+        # non-numeric/missing values simply don't match (consistent with =)
+        m = re.fullmatch(r"([A-Za-z_]\w*)\s*(>=|<=|>|<)\s*(-?\d+(?:\.\d+)?)", (subject or "").strip())
+        if m:
+            f, op, num = m.group(1), m.group(2), float(m.group(3))
+            ops = {">": lambda v: v > num, "<": lambda v: v < num,
+                   ">=": lambda v: v >= num, "<=": lambda v: v <= num}
+            def keep(x):
+                try: return ops[op](float(x.get(f)))
+                except (TypeError, ValueError): return False
+            return [x for x in data if isinstance(x, dict) and keep(x)]
+        # substring form: filter FIELD contains TEXT
+        m = re.fullmatch(r"([A-Za-z_]\w*)\s+contains\s+(.*)", (subject or "").strip())
+        if m:
+            f, needle = m.group(1), m.group(2)
+            return [x for x in data if isinstance(x, dict) and needle in str(x.get(f, ""))]
         if kw:
             k, v = next(iter(kw.items()))
             return [x for x in data if isinstance(x, dict) and str(x.get(k)) == v]

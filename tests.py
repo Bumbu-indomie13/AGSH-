@@ -422,6 +422,43 @@ check("let pass-through: data flows through let + take restores original",
       o and "error" not in o and written == [{"n": 1, "q": "a"}], f"out={o}")
 os.remove(os.path.join(d, "out2.json"))
 
+# --- 20. RELATIONAL + SUBSTRING FILTER ---
+json.dump({"results": [
+    {"id": 1, "name": "alpha", "price": 150},
+    {"id": 2, "name": "beta",  "price": 50},
+    {"id": 3, "name": "gamma", "price": 99.5},
+    {"id": 4, "name": "delta", "price": 250},
+]}, open(os.path.join(d, "fixtures", "api.example.com.json"), "w"))
+
+p = run_script('fetch https://api.example.com/users paginate=results\n'
+               '| filter price>90\n| pick id\n| write t_rel.json\n', d)
+o = parse_out(p)
+rel = json.load(open(os.path.join(d, "t_rel.json"))) if os.path.exists(os.path.join(d, "t_rel.json")) else None
+check("filter price>90 (relational)", o and "error" not in o
+      and rel == [{"id": 1}, {"id": 3}, {"id": 4}], f"out={o} got={rel}")
+os.remove(os.path.join(d, "t_rel.json")) if os.path.exists(os.path.join(d, "t_rel.json")) else None
+
+p = run_script('fetch https://api.example.com/users paginate=results\n'
+               '| filter price<=99.5\n| pick id\n| write t_le.json\n', d)
+o = parse_out(p)
+le = json.load(open(os.path.join(d, "t_le.json"))) if os.path.exists(os.path.join(d, "t_le.json")) else None
+check("filter price<=99.5 (float boundary)", o and "error" not in o
+      and le == [{"id": 2}, {"id": 3}], f"out={o} got={le}")
+os.remove(os.path.join(d, "t_le.json")) if os.path.exists(os.path.join(d, "t_le.json")) else None
+
+p = run_script('fetch https://api.example.com/users paginate=results\n'
+               '| filter name contains lph\n| pick name\n| write t_sub.json\n', d)
+o = parse_out(p)
+sub = json.load(open(os.path.join(d, "t_sub.json"))) if os.path.exists(os.path.join(d, "t_sub.json")) else None
+check("filter name contains", o and "error" not in o and sub == [{"name": "alpha"}], f"out={o} got={sub}")
+os.remove(os.path.join(d, "t_sub.json")) if os.path.exists(os.path.join(d, "t_sub.json")) else None
+
+p = run_script('fetch https://api.example.com/users paginate=results\n'
+               '| filter price>abc\n| count\n', d)
+o = parse_out(p)
+check("filter relational with non-numeric operand -> structured error", o and "error" in o
+      and o["error"]["step"] == "filter", f"out={o}")
+
 # --- cleanup report ---
 print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 for name, det in FAIL:
