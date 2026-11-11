@@ -7,7 +7,7 @@ Verbs: fetch, post, read, write, append, filter, pick, map, search, run,
 All data flows as JSON. Mutations are logged for `undo`. Runtime returns
 delta-feedback (written counts, diffs) instead of silent success.
 """
-import json, os, sys, re, copy, time, urllib.request, urllib.error
+import json, os, sys, re, copy, time, socket, urllib.request, urllib.error
 
 class AGSHError(Exception):
     def __init__(self, step, msg, hint=None, got=None):
@@ -60,12 +60,14 @@ def parse_stage(toks):
     return verb, subject, kwargs
 
 class Runtime:
-    def __init__(self, dry=False, allow_run=False, approve_network_write=False, answer=None):
+    def __init__(self, dry=False, allow_run=False, approve_network_write=False, answer=None,
+                 allow_private_net=False):
         self.log = []          # undo log: [(kind, payload)]
         self.checkpoints = []  # indices into log
         self.allow_run = allow_run
         self.approve_network_write = approve_network_write
         self.answer = answer
+        self.allow_private_net = allow_private_net
         self.stats = {"round_trips": 1, "lines": 0, "verbs": 0}
 
     # ---- undo-able mutations ----
@@ -111,9 +113,36 @@ class Runtime:
         return undone
 
     # ---- built-ins ----
+    PRIVATE_NET_RE = re.compile(
+        r"^(127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0|::1|fe80:|fc00:|fd)"
+        r"|^172\.(1[6-9]|2\d|3[01])\.")
+
+    def _ssrf_guard(self, url, verb):
+        """Resolve host and block private/metadata networks by default
+        (prompt-injection defense: an agent must not be able to reach
+        internal services or cloud metadata endpoints)."""
+        host = url.split("/")[2].split("@")[-1].split(":")[0]
+        if os.path.exists(os.path.join("fixtures", url.split("/")[2] + ".json")):
+            return "fixture"
+        if self.allow_private_net:
+            return "network"
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except Exception as e:
+            raise AGSHError(verb, f"cannot resolve host: {host}", got=str(e))
+        for info in infos:
+            ip = info[4][0]
+            if self.PRIVATE_NET_RE.match(ip):
+                raise AGSHError(verb, f"host {host} resolves to private/metadata IP {ip}",
+                                hint="blocked by default (SSRF guard); re-run with --allow-private-net if this is intentional",
+                                got=ip)
+        return "network"
+
     def v_fetch(self, data, url, kw):
         if not re.match(r"https?://", url):
             raise AGSHError("fetch", "url must start with http(s)://", got=url)
+        source = self._ssrf_guard(url, "fetch")
+        self.stats.setdefault("fetch_sources", []).append(f"{source}:{url.split('/')[2]}")
         # offline demo mode: serve from ./fixtures/<host>.json if present
         fixture = os.path.join("fixtures", url.split("/")[2] + ".json")
         if os.path.exists(fixture):
@@ -122,13 +151,12 @@ class Runtime:
             # a fixture is the whole dataset — no pagination
             self.stats["verbs"] += 1
             return body.get("results", body) if isinstance(body, dict) else body
-        else:
-            req = urllib.request.Request(url, headers={"Accept": "application/json"})
-            try:
-                with urllib.request.urlopen(req, timeout=15) as r:
-                    body = json.loads(r.read().decode())
-            except Exception as e:
-                raise AGSHError("fetch", f"request failed: {e}", got=url)
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                body = json.loads(r.read().decode())
+        except Exception as e:
+            raise AGSHError("fetch", f"request failed: {e}", got=url)
         page_field = kw.get("paginate")
         out = body
         if page_field and isinstance(body, dict):
@@ -142,7 +170,10 @@ class Runtime:
                     break
                 results += chunk
                 page += 1
-                if page > 100: break
+                if page > 100:
+                    # hard cap must be visible, never silent
+                    raise AGSHError("fetch", "pagination hit the 100-page cap — results would be truncated",
+                                    hint="narrow the query or raise the cap deliberately", got=f"{len(results)} rows")
             if failed:
                 # silent truncation violates our own delta-feedback contract
                 raise AGSHError("fetch", f"pagination failed at page {failed} — results may be incomplete",
@@ -454,13 +485,16 @@ def main():
     plan_only = "--plan" in args
     allow_run = "--allow-run" in args
     approve = "--approve" in args
+    allow_private_net = "--allow-private-net" in args
     answer = None
     if "--answer" in args:
         answer = args[args.index("--answer") + 1]
-    rt = Runtime(allow_run=allow_run, approve_network_write=approve, answer=answer)
+    rt = Runtime(allow_run=allow_run, approve_network_write=approve, answer=answer,
+                 allow_private_net=allow_private_net)
     data = None
     src = sys.stdin.read()
     lines = [l.strip() for l in src.splitlines() if l.strip() and not l.strip().startswith("#")]
+    rt.stats["lines"] = len(lines)
     if plan_only:
         print(json.dumps(build_plan(lines), indent=2, ensure_ascii=False))
         return

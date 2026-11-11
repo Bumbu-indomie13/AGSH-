@@ -159,6 +159,9 @@ class H(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0)); self.rfile.read(n)
         hits.append(("POST", self.path))
         self.send_response(201); self.end_headers(); self.wfile.write(b'{"id": 42}')
+    def do_GET(self):
+        hits.append(("GET", self.path))
+        self.send_response(200); self.end_headers(); self.wfile.write(b'{"ok": true}')
     def do_DELETE(self):
         hits.append(("DELETE", self.path))
         self.send_response(204); self.end_headers()
@@ -261,6 +264,36 @@ plan = json.loads(plan_p.stdout)
 check("plan verdict tier 3: out-of-workdir write -> BLOCKED, no flags offered",
       plan["verdict"].startswith("BLOCKED") and plan["approval_required"] == [],
       f"got {plan['verdict']} {plan['approval_required']}")
+
+# --- 12. SSRF GUARD + FIXTURE SOURCE MARKER (review Luthfy #2) ---
+# private/metadata IP blocked by default
+p = run_script('fetch http://169.254.169.254/latest/meta-data/\n', d)
+o = parse_out(p)
+check("SSRF: metadata IP blocked by default",
+      o and "error" in o and "private/metadata" in o["error"]["message"], f"out={o}")
+
+p = run_script('fetch http://127.0.0.1:9/x\n', d)
+o = parse_out(p)
+check("SSRF: loopback blocked by default", o and "error" in o, f"out={o}")
+
+# fixture fetch is marked in stats (no silent shadowing)
+p = run_script('fetch https://api.example.com/users paginate=results\n', d)
+o = parse_out(p)
+check("fixture fetch marked in stats.fetch_sources",
+      o and o["stats"].get("fetch_sources") == ["fixture:api.example.com"], f"out={o['stats']}")
+
+# with --allow-private-net, loopback fetch is allowed (hits live test server)
+srv2 = HTTPServer(("127.0.0.1", 0), H)
+threading.Thread(target=srv2.serve_forever, daemon=True).start()
+port2 = srv2.server_address[1]
+p = sp.run(["python3", AGSH, "--allow-private-net"],
+           input=f'fetch http://127.0.0.1:{port2}/things\n', capture_output=True, text=True, cwd=d)
+o = parse_out(p)
+check("SSRF: --allow-private-net unlocks loopback fetch", o and "error" not in o, f"out={str(o)[:150]}")
+srv2.shutdown()
+
+# stats.lines is real now
+check("stats.lines counts pipeline lines", o and o["stats"]["lines"] == 1, f"out={o['stats']}")
 
 # --- cleanup report ---
 print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")

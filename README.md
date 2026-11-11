@@ -53,8 +53,9 @@ Errors are structured, not tracebacks — built for machine recovery:
 ## Testing
 
 ```bash
-python3 tests.py   # 30 checks: edge cases, path sandbox (incl. append & resume escapes),
-                   # no-self-approve gate, no-traceback contract, undo semantics, 10k-row scale,
+python3 tests.py   # 42 checks: edge cases, path sandbox (incl. append & resume escapes),
+                   # no-self-approve gate, no-traceback contract, SSRF guard (metadata/RFC1918
+                   # blocked by default), fixture-source disclosure, undo semantics, 10k-row scale,
                    # determinism, permission gates, human gating, world-state resume,
                    # real API undo (verified against a live HTTP server)
 ```

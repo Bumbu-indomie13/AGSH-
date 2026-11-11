@@ -22,8 +22,9 @@ quoted     := '"' [^"]* '"' | "'" [^']* "'"
 ### fetch
 `fetch URL [paginate=FIELD]`
 - URL must match `https?://`.
-- Offline mode: if `fixtures/<host>.json` exists, it is served as the complete dataset (no pagination) instead of the network.
-- `paginate=FIELD`: repeatedly appends `FIELD` arrays across `?page=N` until empty (max 100 pages). A failing page after ≥1 success raises a structured error — results are never silently truncated.
+- **SSRF guard**: hosts resolving to private/metadata networks (RFC1918, loopback, link-local `169.254.x`, ULA) are **blocked by default** — agents must not be reachable to internal services via prompt injection. Bypass only with the host-level `--allow-private-net` flag.
+- Offline mode: if `fixtures/<host>.json` exists, it is served as the complete dataset (no pagination) instead of the network. **The data source is always disclosed**: `stats.fetch_sources` reports `fixture:<host>` vs `network:<host>` for every fetch — fixture shadowing can never be silent.
+- `paginate=FIELD`: repeatedly appends `FIELD` arrays across `?page=N` until empty (max 100 pages). A failing page after ≥1 success — or hitting the 100-page cap — raises a structured error; results are never silently truncated.
 
 ### post
 `post URL [undo_method=DELETE|POST] [undo_url=URL]` — performs a real POST with the pipeline data as JSON body. **Requires `--approve`** (host CLI flag only — a script can never approve itself; inline `approve=1` is rejected). With `undo_method`/`undo_url`, `undo` issues a real HTTP call (e.g. DELETE the created resource). Feedback includes HTTP status + response.
@@ -59,13 +60,14 @@ quoted     := '"' [^"]* '"' | "'" [^']* "'"
 ## CLI flags (informed permission model)
 
 ```
-agsh.py [--plan] [--allow-run] [--approve] [--answer TEXT]
+agsh.py [--plan] [--allow-run] [--approve] [--answer TEXT] [--allow-private-net]
 ```
 
 - `--plan` — analyze without executing: per-stage risk classification (pure / local-read / local-write / network-read / network-write / exec / human / mutating) plus an aggregate verdict listing which approval flags are required.
 - `--allow-run` — unlock the `run` verb (restricted execution).
 - `--approve` — unlock `post` (network writes).
 - `--answer TEXT` — supply a human decision to resume past an `ask` gate.
+- `--allow-private-net` — unlock `fetch` to private/metadata networks (SSRF guard bypass; use only when intentional).
 
 The intended loop: agent runs `--plan`, shows the risk summary to the user, gets a decision, then re-runs with the required flag.
 
