@@ -5,3 +5,11 @@ targets.json
 emails.json
 active.json
 world.json
+snapshot.json
+__pycache__/
+*.pyc
+s1.json
+a.json
+b.json
+big.json
+out.json
