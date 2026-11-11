@@ -99,6 +99,18 @@ take users | filter status=active
 
 - `run CMD` — gated by host `--allow-run`. With `allow=a,b` the command runs WITHOUT a shell: argv[0] must be in the list and shell metacharacters (`; & | < > \` $( )) are rejected. Without `allow=`, the command runs through a restricted shell (minimal env, timeout 15s).
 
+## DNS-rebinding defense
+
+`fetch` (network mode) pins the IPs seen at guard time and re-resolves immediately before the request: a mismatch raises `DNS rebinding suspected` — a host that rebinds to a private IP between check and request never gets contacted.
+
+## POST payload validation
+
+`post URL keys=id,name [max_bytes=N]` — validation happens BEFORE any network call: payload must be a dict or list-of-dicts, every item must contain the `keys=` fields (error lists the missing keys and the keys present), and the JSON body is capped at `max_bytes` (default 1 MB). Payload-free posts send `{}` (backward compatible).
+
+## Rate limiting
+
+`fetch` stages are capped at `--max-fetch N` per run (default 20). Exceeding the cap raises a structured error with the count — nothing is silently sent. Host wrapper decides the budget.
+
 ## Audit log
 
 `--audit PATH` — append-only JSONL. One record per stage outcome (and per network resolve):

@@ -365,6 +365,56 @@ p = run_script('read data.json\n| write locked.json\n', d)
 o = parse_out(p)
 check("write succeeds after lock release", o and o["result"]["written"] == 2, f"out={o}")
 
+# --- 17. DNS-REBINDING PIN (backlog #4) — in-process, resolver monkeypatched ---
+sys.path.insert(0, os.path.dirname(os.path.abspath(AGSH)))
+import agsh as agsh_mod
+
+rt = agsh_mod.Runtime()
+_resolutions = iter([{"1.2.3.4"}, {"1.2.3.4"}])
+rt._resolve_ips = lambda host: next(_resolutions)
+source = rt._ssrf_guard("http://rebind-check.example/x", "fetch")
+try:
+    rt._verify_dns_pin("http://rebind-check.example/x", "fetch")
+    stable = True
+except agsh_mod.AGSHError:
+    stable = False
+check("DNS pin: stable resolution passes", source == "network" and stable)
+
+rt2 = agsh_mod.Runtime()
+_resolutions2 = iter([{"1.2.3.4"}, {"10.0.0.5"}])   # rebinds to RFC1918 between check & request
+rt2._resolve_ips = lambda host: next(_resolutions2)
+rt2._ssrf_guard("http://rebind-evil.example/x", "fetch")
+rebound = False
+try:
+    rt2._verify_dns_pin("http://rebind-evil.example/x", "fetch")
+except agsh_mod.AGSHError as e:
+    rebound = "DNS rebinding" in e.msg
+check("DNS pin: rebinding to private IP between check & request blocked", rebound)
+
+# --- 18. POST SCHEMA VALIDATION (backlog #5) ---
+p = run_script('read data.json\n| post http://no-net.example/api keys=id,q\n', d, extra_flags=["--approve"])
+o = parse_out(p)
+check("post missing required keys -> error BEFORE network", o and "error" in o
+      and "missing required keys" in o["error"]["message"], f"out={o}")
+
+p = run_script('read data.json\n| post http://no-net.example/api max_bytes=1\n', d, extra_flags=["--approve"])
+o = parse_out(p)
+check("post oversized payload -> error BEFORE network", o and "error" in o
+      and "payload too large" in o["error"]["message"], f"out={o}")
+
+# --- 19. FETCH RATE LIMIT (backlog #6) ---
+json.dump({"results": [{"ok": 1}]}, open(os.path.join(d, "fixtures", "fixture-ok.example.json"), "w"))
+script20 = "fetch http://fixture-ok.example/a\n" * 2
+p = run_script(script20, d)   # fixture mode; 2 fetches, under cap
+o = parse_out(p)
+check("fetch under rate limit OK", o and "error" not in o and o["stats"]["fetches"] == 2, f"out={o}")
+
+script25 = "fetch http://fixture-ok.example/a\n" * 21
+p = run_script(script25, d, extra_flags=["--max-fetch", "20"])
+o = parse_out(p)
+check("fetch over rate limit -> structured error", o and "error" in o
+      and "rate limit exceeded" in o["error"]["message"], f"out={o}")
+
 # --- cleanup report ---
 print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 for name, det in FAIL:

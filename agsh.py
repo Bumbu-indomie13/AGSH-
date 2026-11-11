@@ -63,7 +63,7 @@ def parse_stage(toks):
 
 class Runtime:
     def __init__(self, dry=False, allow_run=False, approve_network_write=False, answer=None,
-                 allow_private_net=False, audit_path=None):
+                 allow_private_net=False, audit_path=None, max_fetch=20):
         self.log = []          # undo log: [(kind, payload)]
         self.checkpoints = []  # indices into log
         self.allow_run = allow_run
@@ -72,6 +72,8 @@ class Runtime:
         self.allow_private_net = allow_private_net
         self.vars = {}         # named state across the pipeline (let/take)
         self.audit_path = audit_path
+        self._dns_pins = {}    # host -> frozenset of IPs seen at guard time (DNS-rebinding defense)
+        self.max_fetch = max_fetch
         self.stats = {"round_trips": 1, "lines": 0, "verbs": 0}
 
     # ---- audit log (append-only JSONL) ----
@@ -159,6 +161,21 @@ class Runtime:
         r"^(127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0|::1|fe80:|fc00:|fd)"
         r"|^172\.(1[6-9]|2\d|3[01])\.")
 
+    def _url_host(self, url):
+        return url.split("/")[2].split("@")[-1].split(":")[0]
+
+    def _resolve_ips(self, host):
+        return {i[4][0] for i in socket.getaddrinfo(host, None)}
+
+    def _verify_dns_pin(self, url, verb):
+        """DNS-rebinding defense: the IPs seen NOW must equal the IPs seen at
+        guard time — otherwise the host may have rebound to a private IP."""
+        host = self._url_host(url)
+        now = self._resolve_ips(host)
+        if now != self._dns_pins.get(host):
+            raise AGSHError(verb, f"DNS rebinding suspected: {host} resolved to different IPs between check and request",
+                            hint="blocked (TOCTOU defense); if intentional, re-run — but investigate the host", got=sorted(now))
+
     def _ssrf_guard(self, url, verb):
         """Resolve host and block private/metadata networks by default
         (prompt-injection defense: an agent must not be able to reach
@@ -167,24 +184,33 @@ class Runtime:
         if os.path.exists(os.path.join("fixtures", url.split("/")[2] + ".json")):
             return "fixture"
         if self.allow_private_net:
+            self._dns_pins[host] = frozenset(self._resolve_ips(host))
             return "network"
         try:
-            infos = socket.getaddrinfo(host, None)
+            ips = self._resolve_ips(host)
         except Exception as e:
             raise AGSHError(verb, f"cannot resolve host: {host}", got=str(e))
-        for info in infos:
-            ip = info[4][0]
+        for ip in ips:
             if self.PRIVATE_NET_RE.match(ip):
                 raise AGSHError(verb, f"host {host} resolves to private/metadata IP {ip}",
                                 hint="blocked by default (SSRF guard); re-run with --allow-private-net if this is intentional",
                                 got=ip)
+        self._dns_pins[host] = frozenset(ips)  # pinned for rebinding check
         self.audit(verb, url, "ok", {"source": "network", "host": host})
         return "network"
 
     def v_fetch(self, data, url, kw):
         if not re.match(r"https?://", url):
             raise AGSHError("fetch", "url must start with http(s)://", got=url)
+        # rate limit (backlog #6): bounded fetches per run, host-configurable
+        self.stats["fetches"] = self.stats.get("fetches", 0) + 1
+        if self.stats["fetches"] > self.max_fetch:
+            raise AGSHError("fetch", f"rate limit exceeded: more than {self.max_fetch} fetch stages in one run",
+                            hint="raise --max-fetch on the host if this is intentional, or split the task",
+                            got=self.stats["fetches"])
         source = self._ssrf_guard(url, "fetch")
+        if source == "network":
+            self._verify_dns_pin(url, "fetch")  # rebinding defense: re-resolve must match the pin
         self.stats.setdefault("fetch_sources", []).append(f"{source}:{url.split('/')[2]}")
         # offline demo mode: serve from ./fixtures/<host>.json if present
         fixture = os.path.join("fixtures", url.split("/")[2] + ".json")
@@ -520,8 +546,34 @@ class Runtime:
                             got=subject)
         undo_method = kw.get("undo_method")   # e.g. DELETE — real server call on undo
         undo_url = kw.get("undo_url")
+        # schema validation (backlog #5): required keys + size cap BEFORE any
+        # network call — a malformed/oversized payload never leaves the host
+        payload = data if data is not None else {}
+        if not isinstance(payload, (dict, list)):
+            raise AGSHError("post", "payload must be a dict or list (pipe data in)", got=type(data).__name__)
+        body = json.dumps(payload)
+        max_bytes = int(kw.get("max_bytes", 1_000_000))
+        if len(body.encode()) > max_bytes:
+            raise AGSHError("post", f"payload too large: {len(body)} bytes (cap {max_bytes})",
+                            hint="narrow the data first (pick/filter) or raise max_bytes=", got=len(body))
+        required = kw.get("keys")
+        if required:
+            req_keys = [k.strip() for k in required.split(",") if k.strip()]
+            if isinstance(payload, dict):
+                items = [payload]
+            elif all(isinstance(x, dict) for x in payload):
+                items = payload
+            else:
+                raise AGSHError("post", "keys= requires a dict payload or a list of dicts",
+                                got=type(payload).__name__)
+            for it in items:
+                missing = [k for k in req_keys if k not in it]
+                if missing:
+                    raise AGSHError("post", f"payload missing required keys: {missing}",
+                                    hint="add keys= in the post stage listing all required fields",
+                                    got=sorted(it.keys()))
         # actually perform the POST
-        body = json.dumps(data).encode() if data is not None else b"{}"
+        body = body.encode()
         req = urllib.request.Request(subject, data=body, method="POST",
             headers={"Content-Type": "application/json", "Accept": "application/json"})
         try:
@@ -531,9 +583,9 @@ class Runtime:
             raise AGSHError("post", f"request failed: {e}", got=subject)
         self._log_api("POST", subject, data, undo_method, undo_url)
         self.audit("post", subject, "ok", {"status": status,
-                    "undo_method": undo_method, "payload_keys": list(data) if isinstance(data, dict) else None})
+                    "undo_method": undo_method, "payload_keys": list(payload) if isinstance(payload, dict) else None})
         return {"posted": subject, "status": status, "response": resp,
-                "payload_keys": list(data) if isinstance(data, dict) else None}
+                "payload_keys": list(payload) if isinstance(payload, dict) else None}
 
     def v_ask(self, data, subject, kw):
         self.stats["verbs"] += 1
@@ -613,11 +665,15 @@ def main():
     audit_path = None
     if "--audit" in args:
         audit_path = args[args.index("--audit") + 1]
+    max_fetch = 20
+    if "--max-fetch" in args:
+        max_fetch = int(args[args.index("--max-fetch") + 1])
     answer = None
     if "--answer" in args:
         answer = args[args.index("--answer") + 1]
     rt = Runtime(allow_run=allow_run, approve_network_write=approve, answer=answer,
-                 allow_private_net=allow_private_net, audit_path=audit_path)
+                 allow_private_net=allow_private_net, audit_path=audit_path,
+                 max_fetch=max_fetch)
     data = None
     src = sys.stdin.read()
     lines = [l.strip() for l in src.splitlines() if l.strip() and not l.strip().startswith("#")]

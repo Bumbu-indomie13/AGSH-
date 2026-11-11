@@ -53,8 +53,9 @@ Errors are structured, not tracebacks — built for machine recovery:
 ## Testing
 
 ```bash
-python3 tests.py   # 54 checks: edge cases, path sandbox (incl. append & resume escapes),
-                   # SSRF guard, run allowlist, audit log, file locking,
+python3 tests.py   # 60 checks: edge cases, path sandbox (incl. append & resume escapes),
+                   # SSRF guard, DNS-rebinding pin, post schema validation, rate limiting,
+                   # run allowlist, audit log, file locking,
                    # no-self-approve gate, no-traceback contract, SSRF guard (metadata/RFC1918
                    # blocked by default), fixture-source disclosure, undo semantics, 10k-row scale,
                    # determinism, permission gates, human gating, world-state resume,
@@ -88,7 +89,7 @@ Outputs per-task token counts (CSV) for 3 equivalent task pairs. Measured: Pytho
 
 ## Status
 
-Prototype (~470 lines, stdlib-only Python). All five "unsolved layers" now have first-class answers: cross-session world-state (`checkpoint save=` / `resume`), real API-call undo (`post ... undo_method=DELETE undo_url=...` verified against a live server), informed permission model (`--plan` risk aggregation + `--allow-run`/`--approve` flags), gated+restricted `run` with optional argv allowlist (`run CMD allow=sort,wc` — no shell, metacharacters rejected), `ask` human-gating (exit code 2), an append-only audit log (`--audit PATH`, JSONL with ts/verb/risk/outcome), advisory file locking (flock on every mutation, structured error on contention), named pipeline state (`let`/`take`), nested access (`get a.b.c`), and inter-stage type contracts (`assert type list`). Not yet: DNS-rebinding pinning, per-verb rate limiting.
+Prototype (~470 lines, stdlib-only Python). All five "unsolved layers" now have first-class answers: cross-session world-state (`checkpoint save=` / `resume`), real API-call undo (`post ... undo_method=DELETE undo_url=...` verified against a live server), informed permission model (`--plan` risk aggregation + `--allow-run`/`--approve` flags), gated+restricted `run` with optional argv allowlist (`run CMD allow=sort,wc` — no shell, metacharacters rejected), `ask` human-gating (exit code 2), an append-only audit log (`--audit PATH`, JSONL with ts/verb/risk/outcome), advisory file locking (flock on every mutation, structured error on contention), DNS-rebinding pinning (re-resolve must match the guard-time pin before any request), `post` payload validation before any network call (`keys=` required fields + `max_bytes` cap), fetch rate limiting (`--max-fetch`, default 20/run), named pipeline state (`let`/`take`), nested access (`get a.b.c`), and inter-stage type contracts (`assert type list`). Not yet: concurrent-run coordination beyond file locks.
 
 ## Token benchmark
 
