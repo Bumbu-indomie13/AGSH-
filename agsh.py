@@ -744,7 +744,7 @@ class Runtime:
             fn = getattr(self, f"v_{verb}", None)
             if fn is None:
                 raise AGSHError(verb, f"unknown verb '{verb}'",
-                                hint="available: fetch post read write append filter pick map get let take search run ask checkpoint guard undo assert sort group count head tail uniq regex join")
+                                hint="available: fetch post read write append filter pick map get let take search run ask checkpoint guard undo resume assert sort group count head tail uniq regex join")
             try:
                 data = fn(data, subject, kw)
             except AGSHError:
