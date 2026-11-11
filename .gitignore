@@ -13,3 +13,5 @@ a.json
 b.json
 big.json
 out.json
+.agshlock
+*.agshlock

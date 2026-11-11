@@ -97,6 +97,18 @@ take users | filter status=active
 ### assert (perluasan)
 `assert type list|dict|str|num` — kontrak tipe antar-stage; mismatch → structured error dengan hint bentuk output.
 
+- `run CMD` — gated by host `--allow-run`. With `allow=a,b` the command runs WITHOUT a shell: argv[0] must be in the list and shell metacharacters (`; & | < > \` $( )) are rejected. Without `allow=`, the command runs through a restricted shell (minimal env, timeout 15s).
+
+## Audit log
+
+`--audit PATH` — append-only JSONL. One record per stage outcome (and per network resolve):
+`{"ts": "<iso8601>", "verb": "...", "risk": "...", "subject": "...", "outcome": "ok"|"error", "cwd": "...", ...extra}`.
+Recommended for any shared/production use; the host wrapper should always pass `--audit`.
+
+## File locking
+
+All file mutations (`write`, `append`, `resume` restores) take an advisory `flock` on `<path>.agshlock`. A second process mutating the same file gets a structured `file is locked by another process` error (retry hint included). Stale `.agshlock` files are safe to delete.
+
 ## Parsing contract
 
 - Values containing `=`, `>`, `<`, or `|` **must be quoted**: `filter x="a>b"`.

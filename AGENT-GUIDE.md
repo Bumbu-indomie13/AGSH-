@@ -119,6 +119,9 @@ Buat file `fixtures/<host>.json` di working dir → `fetch` ke host itu menyajik
 - `undo` hanya merevert mutasi SETELAH checkpoint terakhir — urutan checkpoint penting.
 - API undo butuh `undo_method`+`undo_url` eksplisit; tanpa itu hanya tercatat sebagai intent.
 - `map` terbatas (lower/upper/strip/rename) — transformasi kompleks lewat `run` (butuh approval).
+- `run` allowlist mode (`run CMD allow=sort,wc`): no shell, argv allowlist, metacharacters rejected — mitigation for shell injection inside `--allow-run`.
+- Audit log (`--audit PATH`): append-only JSONL of every stage outcome + network resolve (ts/verb/risk/subject/outcome/cwd).
+- File locking: advisory flock on every mutation; concurrent agents get a structured lock error instead of silent corruption.
 - Pagination cap 100 halaman; gagal/cap = structured error (tidak pernah truncate diam-diam).
 
 ## 8. Integrasi sebagai tool (pola wrapper)
@@ -140,7 +143,7 @@ Di Hermes: panggil via terminal/execute_code dengan printf pipe (lihat §2). Unt
 3. Working dir bersih/dedikasi — semua file ops terkunci di situ
 4. `checkpoint` dipasang sebelum mutasi yang mungkin di-undo
 5. `stats.fetch_sources` diperiksa — jangan percaya data fixture bila mengira network
-6. Test suite lulus di mesin target: `python3 tests.py` (42/42)
+6. Test suite lulus di mesin target: `python3 tests.py` (54/54)
 
 ## 10. Menambah AGSH sebagai tool call di agent runtime
 

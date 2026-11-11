@@ -53,7 +53,8 @@ Errors are structured, not tracebacks — built for machine recovery:
 ## Testing
 
 ```bash
-python3 tests.py   # 42 checks: edge cases, path sandbox (incl. append & resume escapes),
+python3 tests.py   # 54 checks: edge cases, path sandbox (incl. append & resume escapes),
+                   # SSRF guard, run allowlist, audit log, file locking,
                    # no-self-approve gate, no-traceback contract, SSRF guard (metadata/RFC1918
                    # blocked by default), fixture-source disclosure, undo semantics, 10k-row scale,
                    # determinism, permission gates, human gating, world-state resume,
@@ -87,7 +88,7 @@ Outputs per-task token counts (CSV) for 3 equivalent task pairs. Measured: Pytho
 
 ## Status
 
-Prototype (~450 lines, stdlib-only Python). All five "unsolved layers" now have first-class answers: cross-session world-state (`checkpoint save=` / `resume`), real API-call undo (`post ... undo_method=DELETE undo_url=...` verified against a live server), informed permission model (`--plan` risk aggregation + `--allow-run`/`--approve` flags), gated+restricted `run`, and `ask` human-gating (exit code 2). Not yet: multi-user audit log, per-verb rate limiting.
+Prototype (~470 lines, stdlib-only Python). All five "unsolved layers" now have first-class answers: cross-session world-state (`checkpoint save=` / `resume`), real API-call undo (`post ... undo_method=DELETE undo_url=...` verified against a live server), informed permission model (`--plan` risk aggregation + `--allow-run`/`--approve` flags), gated+restricted `run` with optional argv allowlist (`run CMD allow=sort,wc` — no shell, metacharacters rejected), `ask` human-gating (exit code 2), an append-only audit log (`--audit PATH`, JSONL with ts/verb/risk/outcome), advisory file locking (flock on every mutation, structured error on contention), named pipeline state (`let`/`take`), nested access (`get a.b.c`), and inter-stage type contracts (`assert type list`). Not yet: DNS-rebinding pinning, per-verb rate limiting.
 
 ## Token benchmark
 

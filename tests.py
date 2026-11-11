@@ -5,8 +5,8 @@ import json, os, subprocess, shutil, tempfile, time, sys
 PASS, FAIL = [], []
 AGSH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agsh.py")
 
-def run_script(script, cwd):
-    return subprocess.run(["python3", AGSH], input=script, capture_output=True,
+def run_script(script, cwd, extra_flags=None):
+    return subprocess.run(["python3", AGSH] + (extra_flags or []), input=script, capture_output=True,
                           text=True, timeout=60, cwd=cwd)
 
 def check(name, cond, detail=""):
@@ -319,6 +319,51 @@ p = run_script('read data.json\n| get 0.users\n', d)  # data.json is a list of d
 o = parse_out(p)
 check("get on wrong type -> structured error with hint",
       o and "error" in o and ("key not found" in o["error"]["message"]), f"out={o}")
+
+# --- 14. RUN ALLOWLIST (backlog #1) ---
+p = run_script('run echo hello allow=echo,wc\n', d, extra_flags=["--allow-run"])
+o = parse_out(p)
+check("run allowlisted command (no shell)", o and o["result"]["exit_code"] == 0
+      and o["result"]["stdout"] == "hello", f"out={o}")
+
+p = run_script('run rm -rf . allow=echo,wc\n', d, extra_flags=["--allow-run"])
+o = parse_out(p)
+check("run non-allowlisted command blocked", o and "error" in o
+      and "not in allowlist" in o["error"]["message"], f"out={o}")
+
+p = run_script('run echo hi && rm x allow=echo\n', d, extra_flags=["--allow-run"])
+o = parse_out(p)
+check("run allowlist mode forbids shell metacharacters", o and "error" in o
+      and "metacharacters" in o["error"]["message"], f"out={o}")
+
+# --- 15. AUDIT LOG JSONL (backlog #2) ---
+audit_file = os.path.join(d, "audit.jsonl")
+p = run_script('read data.json\n| filter q=a\n| write out.json\n| write /etc/x\n', d,
+               extra_flags=["--audit", audit_file])
+o = parse_out(p)
+recs = [json.loads(l) for l in open(audit_file)]
+subjects = [r["subject"] for r in recs]
+check("audit log records ok + error outcomes",
+      o and any("write" in r["verb"] and r["outcome"] == "ok" for r in recs)
+      and any(r["outcome"] == "error" for r in recs), f"recs={subjects}")
+check("audit records have ts/risk/cwd",
+      all(("ts" in r and "risk" in r and "cwd" in r) for r in recs), f"rec0={recs[0] if recs else None}")
+os.remove(audit_file)
+
+# --- 16. FILE LOCK (backlog #3) ---
+target = os.path.join(d, "locked.json")
+json.dump([1], open(target, "w"))
+lockf = open(target + ".agshlock", "a+")
+import fcntl as _fcntl
+_fcntl.flock(lockf, _fcntl.LOCK_EX)  # simulate another agent holding the lock
+p = run_script('read data.json\n| write locked.json\n', d)
+o = parse_out(p)
+check("write on locked file -> structured error", o and "error" in o
+      and "locked by another process" in o["error"]["message"], f"out={o}")
+_fcntl.flock(lockf, _fcntl.LOCK_UN); lockf.close()
+p = run_script('read data.json\n| write locked.json\n', d)
+o = parse_out(p)
+check("write succeeds after lock release", o and o["result"]["written"] == 2, f"out={o}")
 
 # --- cleanup report ---
 print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")

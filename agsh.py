@@ -7,7 +7,9 @@ Verbs: fetch, post, read, write, append, filter, pick, map, search, run,
 All data flows as JSON. Mutations are logged for `undo`. Runtime returns
 delta-feedback (written counts, diffs) instead of silent success.
 """
-import json, os, sys, re, copy, time, socket, urllib.request, urllib.error
+import json, os, sys, re, copy, time, socket, shlex, fcntl, datetime
+import urllib.request, urllib.error
+from contextlib import contextmanager
 
 class AGSHError(Exception):
     def __init__(self, step, msg, hint=None, got=None):
@@ -61,7 +63,7 @@ def parse_stage(toks):
 
 class Runtime:
     def __init__(self, dry=False, allow_run=False, approve_network_write=False, answer=None,
-                 allow_private_net=False):
+                 allow_private_net=False, audit_path=None):
         self.log = []          # undo log: [(kind, payload)]
         self.checkpoints = []  # indices into log
         self.allow_run = allow_run
@@ -69,7 +71,46 @@ class Runtime:
         self.answer = answer
         self.allow_private_net = allow_private_net
         self.vars = {}         # named state across the pipeline (let/take)
+        self.audit_path = audit_path
         self.stats = {"round_trips": 1, "lines": 0, "verbs": 0}
+
+    # ---- audit log (append-only JSONL) ----
+    def audit(self, verb, subject, outcome, extra=None):
+        if not self.audit_path:
+            return
+        try:
+            rec = {"ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds"),
+                   "verb": verb, "risk": RISK.get(verb, "unknown"),
+                   "subject": (subject or "")[:200], "outcome": outcome,
+                   "cwd": os.getcwd()}
+            if extra: rec.update(extra)
+            with open(self.audit_path, "a") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:
+            pass  # auditing must never break the pipeline
+
+    # ---- advisory file lock (multi-agent safety) ----
+    @contextmanager
+    def _file_lock(self, path, verb):
+        lock_path = path + ".agshlock"
+        try:
+            f = open(lock_path, "a+")
+        except OSError as e:
+            raise AGSHError(verb, f"cannot create lock file: {e}", got=lock_path)
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            f.close()
+            raise AGSHError(verb, f"file is locked by another process: {path}",
+                            hint="another agent is writing this file — retry later (stale locks are safe to delete: *.agshlock)",
+                            got=path)
+        try:
+            yield
+        finally:
+            try:
+                fcntl.flock(f, fcntl.LOCK_UN)
+            finally:
+                f.close()
 
     # ---- undo-able mutations ----
     def _log_write(self, path, existed, prev_content):
@@ -137,6 +178,7 @@ class Runtime:
                 raise AGSHError(verb, f"host {host} resolves to private/metadata IP {ip}",
                                 hint="blocked by default (SSRF guard); re-run with --allow-private-net if this is intentional",
                                 got=ip)
+        self.audit(verb, url, "ok", {"source": "network", "host": host})
         return "network"
 
     def v_fetch(self, data, url, kw):
@@ -235,7 +277,7 @@ class Runtime:
                             hint="pipe data into write, e.g. '... | write targets.json'", got=subject)
         existed = os.path.exists(path)
         prev = open(path).read() if existed else None
-        with open(path, "w") as f:
+        with self._file_lock(path, "write"), open(path, "w") as f:
             if isinstance(data, (list, dict)):
                 json.dump(data, f, indent=2)
             else:
@@ -249,6 +291,7 @@ class Runtime:
                 if isinstance(old, list): delta = n - len(old)
             except Exception: pass
         self._log_write(path, existed, prev)
+        self.audit("write", subject, "ok", {"path": path, "written": n})
         fb = {"written": n, "path": path}
         if delta is not None: fb["diff_vs_previous"] = delta
         return fb
@@ -360,17 +403,20 @@ class Runtime:
             p = self._check_path(os.path.join(os.getcwd(), p), "resume")
             existed = os.path.exists(p)
             prev = open(p).read() if existed else None
-            if content is None:
-                if existed: os.remove(p)
-            else:
-                open(p, "w").write(content)
+            with self._file_lock(p, "resume"):
+                if content is None:
+                    if existed: os.remove(p)
+                else:
+                    open(p, "w").write(content)
             self._log_write(p, existed, prev)
             restored.append(p)
+        self.audit("resume", subject, "ok", {"restored_files": restored})
         return {"resumed": subject, "restored_files": restored, "data": world.get("data")}
 
     def v_undo(self, data, subject, kw):
         undone = self.undo_since(kw.get("checkpoint", None) if kw.get("checkpoint", "").isdigit() else None)
         self.stats["verbs"] += 1
+        self.audit("undo", subject or "last", "ok", {"undone": len(undone)})
         return {"undone": undone, "data": data}
 
     def v_read(self, data, subject, kw):
@@ -388,11 +434,31 @@ class Runtime:
             raise AGSHError("run", "shell execution is gated",
                             hint="inspect the plan (--plan), then re-run with --allow-run if approved",
                             got=subject)
-        import subprocess
-        # restricted execution: minimal env, working-dir-only cwd, hard timeout
-        env = {"PATH": "/usr/bin:/bin", "HOME": os.getcwd(), "LANG": "C"}
-        r = subprocess.run(subject, shell=True, capture_output=True, text=True,
-                           timeout=int(kw.get("timeout", 15)), env=env, cwd=os.getcwd())
+        allow = kw.get("allow")
+        if allow:
+            # allowlist mode: no shell metacharacters, argv[0] must be in the
+            # list, and the command runs WITHOUT a shell (no injection surface)
+            allowed = {x.strip() for x in allow.split(",") if x.strip()}
+            if re.search(r"[;&|<>`$(){}\[\]\\\n]", subject):
+                raise AGSHError("run", "allowlist mode forbids shell metacharacters",
+                                hint="each command must be a plain argv (no pipes, ;, &&, redirects)",
+                                got=subject)
+            argv0 = shlex.split(subject)[0]
+            if argv0 not in allowed:
+                raise AGSHError("run", f"command not in allowlist: {argv0}",
+                                hint=f"allowed: {sorted(allowed)}; extend with allow=a,b in the script or ask the host for --allow-run approval",
+                                got=argv0)
+            import subprocess
+            env = {"PATH": "/usr/bin:/bin", "HOME": os.getcwd(), "LANG": "C"}
+            r = subprocess.run(shlex.split(subject), capture_output=True, text=True,
+                               timeout=int(kw.get("timeout", 15)), env=env, cwd=os.getcwd())
+        else:
+            import subprocess
+            # restricted execution: minimal env, working-dir-only cwd, hard timeout
+            env = {"PATH": "/usr/bin:/bin", "HOME": os.getcwd(), "LANG": "C"}
+            r = subprocess.run(subject, shell=True, capture_output=True, text=True,
+                               timeout=int(kw.get("timeout", 15)), env=env, cwd=os.getcwd())
+        self.audit("run", subject, "ok", {"exit_code": r.returncode, "allowlisted": bool(allow)})
         return {"exit_code": r.returncode, "stdout": r.stdout.strip()[:2000],
                 "stderr": r.stderr.strip()[:2000]}
 
@@ -438,9 +504,10 @@ class Runtime:
         subject = self._check_path(subject, "append")
         existed = os.path.exists(subject)
         prev = open(subject).read() if existed else ""
-        with open(subject, "a") as f:
+        with self._file_lock(subject, "append"), open(subject, "a") as f:
             f.write(json.dumps(data) + "\n" if isinstance(data, (dict, list)) else str(data) + "\n")
         self._log_write(subject, existed, prev)
+        self.audit("append", subject, "ok", {"path": subject})
         return {"appended": True, "path": subject}
 
     def v_post(self, data, subject, kw):
@@ -463,6 +530,8 @@ class Runtime:
         except Exception as e:
             raise AGSHError("post", f"request failed: {e}", got=subject)
         self._log_api("POST", subject, data, undo_method, undo_url)
+        self.audit("post", subject, "ok", {"status": status,
+                    "undo_method": undo_method, "payload_keys": list(data) if isinstance(data, dict) else None})
         return {"posted": subject, "status": status, "response": resp,
                 "payload_keys": list(data) if isinstance(data, dict) else None}
 
@@ -483,7 +552,11 @@ class Runtime:
             if fn is None:
                 raise AGSHError(verb, f"unknown verb '{verb}'",
                                 hint="available: fetch post read write append filter pick map get let take search run ask checkpoint guard undo assert")
-            data = fn(data, subject, kw)
+            try:
+                data = fn(data, subject, kw)
+            except AGSHError:
+                self.audit(verb, subject, "error")
+                raise
         return data
 
 # risk classes for the informed-permission plan
@@ -537,11 +610,14 @@ def main():
     allow_run = "--allow-run" in args
     approve = "--approve" in args
     allow_private_net = "--allow-private-net" in args
+    audit_path = None
+    if "--audit" in args:
+        audit_path = args[args.index("--audit") + 1]
     answer = None
     if "--answer" in args:
         answer = args[args.index("--answer") + 1]
     rt = Runtime(allow_run=allow_run, approve_network_write=approve, answer=answer,
-                 allow_private_net=allow_private_net)
+                 allow_private_net=allow_private_net, audit_path=audit_path)
     data = None
     src = sys.stdin.read()
     lines = [l.strip() for l in src.splitlines() if l.strip() and not l.strip().startswith("#")]
