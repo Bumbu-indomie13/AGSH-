@@ -1,0 +1,6 @@
+# Fetch users, keep active company emails, save with postcondition
+fetch https://api.example.com/users paginate=results
+| filter status=active
+| filter email ends-with @company.com
+| write targets.json
+| assert count>0

@@ -1,0 +1,7 @@
+# Guarded read with rollback point
+guard file exists users.json
+| checkpoint
+| read users.json
+| filter status=active
+| write active.json
+| undo

@@ -1,0 +1,7 @@
+# Normalize + project + rename
+fetch https://api.example.com/users paginate=results
+| map lower email
+| pick email
+| map corporate=email
+| pick corporate
+| assert count>0
