@@ -615,6 +615,128 @@ class Runtime:
                           "data": data, "stats": self.stats}, ensure_ascii=False))
         sys.exit(2)
 
+    # ---- enhanced composition verbs (PR2 by @DeryClawbot) ----
+    def v_sort(self, data, subject, kw):
+        self.stats["verbs"] += 1
+        if not isinstance(data, list):
+            raise AGSHError("sort", "input must be a list", got=type(data).__name__)
+        toks = (subject or "").split()
+        desc = toks and toks[-1] == "desc"
+        field = toks[0] if toks and toks[0] != "desc" else None
+        if field:
+            keyed = [x for x in data if isinstance(x, dict) and field in x]
+            if len(keyed) != len(data):
+                raise AGSHError("sort", f"field '{field}' missing in {len(data)-len(keyed)} items",
+                                hint="all items must be dicts containing the field", got=field)
+            return sorted(keyed, key=lambda x: x[field], reverse=desc)
+        try:
+            return sorted(data, reverse=desc)
+        except TypeError:
+            raise AGSHError("sort", "items are not comparable", got=type(data[0]).__name__ if data else None)
+
+    def v_group(self, data, subject, kw):
+        self.stats["verbs"] += 1
+        if not isinstance(data, list):
+            raise AGSHError("group", "input must be a list", got=type(data).__name__)
+        out = {}
+        for x in data:
+            k = x.get(subject) if isinstance(x, dict) else None
+            out.setdefault(str(k), []).append(x)
+        return out
+
+    def v_count(self, data, subject, kw):
+        self.stats["verbs"] += 1
+        n = len(data) if isinstance(data, (list, dict, str)) else (1 if data is not None else 0)
+        return {"count": n}
+
+    def v_head(self, data, subject, kw):
+        self.stats["verbs"] += 1
+        if not isinstance(data, list):
+            raise AGSHError("head", "input must be a list", got=type(data).__name__)
+        try:
+            n = int(subject) if subject else 10
+        except ValueError:
+            raise AGSHError("head", "N must be an integer", hint="usage: head N", got=subject)
+        if n <= 0:
+            raise AGSHError("head", "N must be >= 1", hint="head -N is ambiguous and rejected; use tail for the end", got=subject)
+        return data[:n]
+
+    def v_tail(self, data, subject, kw):
+        self.stats["verbs"] += 1
+        if not isinstance(data, list):
+            raise AGSHError("tail", "input must be a list", got=type(data).__name__)
+        try:
+            n = int(subject) if subject else 10
+        except ValueError:
+            raise AGSHError("tail", "N must be an integer", hint="usage: tail N", got=subject)
+        if n <= 0:
+            raise AGSHError("tail", "N must be >= 1", hint="tail -N is ambiguous and rejected", got=subject)
+        return data[-n:]
+
+    def v_uniq(self, data, subject, kw):
+        self.stats["verbs"] += 1
+        if not isinstance(data, list):
+            raise AGSHError("uniq", "input must be a list", got=type(data).__name__)
+        seen, out = set(), []
+        for x in data:
+            k = str(x.get(subject)) if isinstance(x, dict) and subject else json.dumps(x, sort_keys=True)
+            if k not in seen:
+                seen.add(k); out.append(x)
+        return out
+
+    def v_regex(self, data, subject, kw):
+        self.stats["verbs"] += 1
+        toks = (subject or "").split(None, 1)
+        if len(toks) != 2:
+            raise AGSHError("regex", "usage: regex FIELD PATTERN", got=subject)
+        field, pat = toks
+        try:
+            rx = re.compile(pat)
+        except re.error as e:
+            raise AGSHError("regex", f"invalid pattern: {e}", hint="escape regex metacharacters or test the pattern separately", got=pat)
+        if not isinstance(data, list):
+            raise AGSHError("regex", "input must be a list", got=type(data).__name__)
+        out = []
+        for x in data:
+            if isinstance(x, dict):
+                x = dict(x)
+                m = rx.search(str(x.get(field, "")))
+                x[field + "_match"] = m.group(1) if (m and m.groups()) else (m.group(0) if m else None)
+            out.append(x)
+        return out
+
+    def v_join(self, data, subject, kw):
+        """join FILE KEY_A KEY_B - left-merge data list with list from FILE."""
+        self.stats["verbs"] += 1
+        toks = (subject or "").split()
+        if len(toks) != 3:
+            raise AGSHError("join", "usage: join FILE KEY_A KEY_B", got=subject)
+        path = self._check_path(toks[0], "join")
+        if not isinstance(data, list):
+            raise AGSHError("join", "input must be a list", got=type(data).__name__)
+        if not os.path.exists(path):
+            raise AGSHError("join", f"file not found: {toks[0]}", got=toks[0])
+        try:
+            right = json.load(open(path))
+        except json.JSONDecodeError as e:
+            raise AGSHError("join", f"joined file is not valid JSON: {e}", got=toks[0])
+        if not isinstance(right, list):
+            raise AGSHError("join", "joined file must contain a JSON list", got=toks[0])
+        ka, kb = toks[1], toks[2]
+        index = {}
+        for r in right:
+            if isinstance(r, dict) and kb in r:
+                index.setdefault(str(r[kb]), r)
+        out = []
+        for x in data:
+            if isinstance(x, dict) and ka in x:
+                r = index.get(str(x[ka]))
+                if r:
+                    merged = dict(x); merged.update(r)
+                    out.append(merged); continue
+            out.append(x)
+        return out
+
     def execute_line(self, line, data=None):
         stages = tokenize(line)
         for toks in stages:
@@ -622,7 +744,7 @@ class Runtime:
             fn = getattr(self, f"v_{verb}", None)
             if fn is None:
                 raise AGSHError(verb, f"unknown verb '{verb}'",
-                                hint="available: fetch post read write append filter pick map get let take search run ask checkpoint guard undo assert")
+                                hint="available: fetch post read write append filter pick map get let take search run ask checkpoint guard undo assert sort group count head tail uniq regex join")
             try:
                 data = fn(data, subject, kw)
             except AGSHError:
@@ -638,6 +760,9 @@ RISK = {
     "post": "network-write", "run": "exec", "checkpoint": "safe",
     "undo": "mutating", "ask": "human", "resume": "mutating",
     "let": "pure", "take": "pure", "get": "pure",
+    # PR2 composition verbs (by @DeryClawbot): pure unless reading a file
+    "sort": "pure", "group": "pure", "count": "pure", "head": "pure",
+    "tail": "pure", "uniq": "pure", "regex": "pure", "join": "local-read",
 }
 
 def build_plan(lines):
