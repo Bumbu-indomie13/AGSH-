@@ -22,11 +22,11 @@ quoted     := '"' [^"]* '"' | "'" [^']* "'"
 ### fetch
 `fetch URL [paginate=FIELD]`
 - URL must match `https?://`.
-- Offline mode: if `fixtures/<host>.json` exists, it is served instead of the network.
-- `paginate=FIELD`: repeatedly appends `FIELD` arrays across `?page=N` until empty (max 100 pages).
+- Offline mode: if `fixtures/<host>.json` exists, it is served as the complete dataset (no pagination) instead of the network.
+- `paginate=FIELD`: repeatedly appends `FIELD` arrays across `?page=N` until empty (max 100 pages). A failing page after ≥1 success raises a structured error — results are never silently truncated.
 
 ### post
-`post URL [approve=1] [undo_method=DELETE|POST] [undo_url=URL]` — performs a real POST with the pipeline data as JSON body. **Requires `--approve`** (informed permission; see CLI). With `undo_method`/`undo_url`, `undo` issues a real HTTP call (e.g. DELETE the created resource). Feedback includes HTTP status + response.
+`post URL [undo_method=DELETE|POST] [undo_url=URL]` — performs a real POST with the pipeline data as JSON body. **Requires `--approve`** (host CLI flag only — a script can never approve itself; inline `approve=1` is rejected). With `undo_method`/`undo_url`, `undo` issues a real HTTP call (e.g. DELETE the created resource). Feedback includes HTTP status + response.
 
 ### read / write / append
 `read FILE` · `write FILE` · `append FILE`

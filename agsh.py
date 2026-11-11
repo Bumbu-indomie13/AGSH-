@@ -15,32 +15,33 @@ class AGSHError(Exception):
         super().__init__(f"[{step}] {msg}" + (f" | hint: {hint}" if hint else "") + (f" | got: {got}" if got is not None else ""))
 
 def tokenize(line):
-    """Split a pipeline line into stage token lists."""
-    stages, cur, buf = [], [], ""
-    i, in_q, qch = 0, False, None
-    while i < len(line):
-        c = line[i]
+    """Split a pipeline line into stage TOKEN LISTS, honoring quotes:
+    quotes group content (including spaces) into a single token, and quote
+    characters are stripped."""
+    stages, cur, buf, in_q, qch = [], [], "", False, None
+    for c in line:
         if in_q:
-            if c == qch: in_q = False
-            else: buf += c
+            if c == qch:
+                in_q = False
+            else:
+                buf += c
         elif c in "\"'":
             in_q, qch = True, c
         elif c == "|":
-            stages.append(buf.strip()); buf = ""
-        elif c == " " or c == "\t":
-            if buf: cur.append(buf); buf = ""
+            stages.append(cur)
+            cur, buf = [], ""
+        elif c in " \t":
+            if buf:
+                cur.append(buf)
+                buf = ""
         else:
             buf += c
-        i += 1
-    if buf: cur.append(buf)
-    if cur: stages.append(" ".join(cur))
-    parsed = []
-    for s in stages:
-        toks = re.findall(r'([^\s"\']+|"[^"]*"|\'[^\']*\')', s)
-        toks = [t[1:-1] if t[0] in "\"'" and len(t) > 1 else t for t in toks]
-        if toks:
-            parsed.append(toks)
-    return parsed
+    if buf:
+        cur.append(buf)
+    if cur:
+        stages.append(cur)
+    # drop empty stages (e.g. leading "|" continuation lines)
+    return [t for t in stages if any(tok != "|" for tok in t)]
 
 def parse_stage(toks):
     verb, subject, kwargs = None, None, {}
@@ -115,6 +116,9 @@ class Runtime:
         if os.path.exists(fixture):
             with open(fixture) as f:
                 body = json.load(f)
+            # a fixture is the whole dataset — no pagination
+            self.stats["verbs"] += 1
+            return body.get("results", body) if isinstance(body, dict) else body
         else:
             req = urllib.request.Request(url, headers={"Accept": "application/json"})
             try:
@@ -125,13 +129,21 @@ class Runtime:
         page_field = kw.get("paginate")
         out = body
         if page_field and isinstance(body, dict):
-            results, page = [], 1
+            results, page, failed = [], 1, None
             while True:
                 chunk = body.get(page_field) if page == 1 else self._fetch_page(url, page_field, page)
-                if not chunk: break
+                if chunk is None and page > 1:
+                    failed = page
+                    break
+                if not chunk:
+                    break
                 results += chunk
                 page += 1
                 if page > 100: break
+            if failed:
+                # silent truncation violates our own delta-feedback contract
+                raise AGSHError("fetch", f"pagination failed at page {failed} — results may be incomplete",
+                                hint="fix the API or remove paginate=", got=f"{len(results)} rows collected")
             out = results
         self.stats["verbs"] += 1
         return out
@@ -142,7 +154,7 @@ class Runtime:
             with urllib.request.urlopen(f"{url}{sep}page={page}", timeout=15) as r:
                 return json.loads(r.read().decode()).get(field, [])
         except Exception:
-            return []
+            return None  # distinguishable from an empty page []
 
     def v_filter(self, data, subject, kw):
         self.stats["verbs"] += 1
@@ -233,11 +245,14 @@ class Runtime:
         save = kw.get("save")
         if save:  # world-state checkpoint: data + snapshot of all tracked files
             path = self._check_path(save, "checkpoint")
+            cwd = os.path.realpath(os.getcwd())
             files = {}
             for kind, payload in self.log:
                 if kind == "write" and payload["path"] not in files:
                     p = payload["path"]
-                    files[p] = open(p).read() if os.path.exists(p) else None
+                    # store RELATIVE to cwd so the world file is portable
+                    rel = os.path.relpath(p, cwd)
+                    files[rel] = open(p).read() if os.path.exists(p) else None
             json.dump({"data": data, "files": files, "log_len": len(self.log)},
                       open(path, "w"), ensure_ascii=False)
             world = {"world_saved": path, "files": list(files)}
@@ -256,6 +271,9 @@ class Runtime:
         world = json.load(open(path))
         restored = []
         for p, content in world.get("files", {}).items():
+            # validate EVERY path — a world file must never be an arbitrary
+            # write primitive; paths are relative to cwd (portable)
+            p = self._check_path(os.path.join(os.getcwd(), p), "resume")
             existed = os.path.exists(p)
             prev = open(p).read() if existed else None
             if content is None:
@@ -333,6 +351,7 @@ class Runtime:
 
     def v_append(self, data, subject, kw):
         self.stats["verbs"] += 1
+        subject = self._check_path(subject, "append")
         existed = os.path.exists(subject)
         prev = open(subject).read() if existed else ""
         with open(subject, "a") as f:
@@ -342,7 +361,9 @@ class Runtime:
 
     def v_post(self, data, subject, kw):
         self.stats["verbs"] += 1
-        if kw.get("approve") != "1" and not self.approve_network_write:
+        # approval can ONLY come from the host CLI (--approve); a script can
+        # never approve itself
+        if not self.approve_network_write:
             raise AGSHError("post", "network write requires approval",
                             hint="show the plan (--plan) to the user, then re-run with --approve",
                             got=subject)
@@ -428,6 +449,13 @@ def main():
         except AGSHError as e:
             print(json.dumps({"error": {"step": e.step, "message": e.msg,
                                         "hint": e.hint, "got": e.got},
+                              "stats": rt.stats}, ensure_ascii=False))
+            sys.exit(1)
+        except Exception as e:
+            # contract: no tracebacks cross the boundary — even internal bugs
+            print(json.dumps({"error": {"step": "?", "message":
+                                        f"internal: {e.__class__.__name__}: {e}",
+                                        "hint": "report this as a bug — internal error leaked"},
                               "stats": rt.stats}, ensure_ascii=False))
             sys.exit(1)
     out = {"result": data, "stats": rt.stats}

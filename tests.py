@@ -181,6 +181,47 @@ check("undo performs REAL DELETE against server", any(m == "DELETE" for m in met
       and "HTTP 204" in json.dumps(o["result"]), f"hits={hits} result={o['result']}")
 srv.shutdown()
 
+# --- 10. REVIEWER BLIND-SPOTS (negative tests) ---
+# append must be sandboxed like read/write
+outside = os.path.dirname(d)
+esc = os.path.join(outside, "APPEND_ESCAPE.txt")
+if os.path.exists(esc): os.remove(esc)
+p = run_script('append /tmp/APPEND_ESCAPE_TXT_PLACEHOLDER\n', d)  # absolute → likely blocked
+p = run_script(f'append {esc}\n', d)
+o = parse_out(p)
+check("append outside workdir BLOCKED (reviewer bug #1)",
+      o and "error" in o and not os.path.exists(esc), f"out={o} exists={os.path.exists(esc)}")
+
+# resume must not be an arbitrary write primitive
+wf = os.path.join(d, "evil_world.json")
+json.dump({"data": 1, "files": {"/tmp/RESUME_ESCAPE.txt": "pwned"}, "log_len": 0},
+          open(wf, "w"))
+esc2 = "/tmp/RESUME_ESCAPE.txt"
+if os.path.exists(esc2): os.remove(esc2)
+p = run_script('resume evil_world.json\n', d)
+o = parse_out(p)
+check("resume with absolute path in world file BLOCKED (reviewer bug #2)",
+      o and "error" in o and not os.path.exists(esc2), f"out={o} exists={os.path.exists(esc2)}")
+
+# inline approve=1 must NOT bypass --approve (reviewer bug #3)
+p = sp.run(["python3", AGSH], input=f'post http://127.0.0.1:{port}/things approve=1\n',
+           capture_output=True, text=True, cwd=d)
+o = parse_out(p)
+check("post with inline approve=1 still BLOCKED (reviewer bug #3)",
+      o and "error" in o and "approval" in o["error"]["message"], f"out={o}")
+
+# no tracebacks cross the boundary (reviewer bug #4)
+p = run_script('read a=b.json\n', d)
+o = parse_out(p)
+check("malformed token -> structured error, NOT traceback (reviewer bug #4)",
+      o and "error" in o and "Traceback" not in p.stdout + p.stderr, f"stdout={p.stdout[:120]} stderr={p.stderr[:80]}")
+
+# quoted value with spaces (reviewer bonus) — fixture at this point is the 10k dataset
+p = run_script('fetch https://api.example.com/users paginate=results\n| filter email="u1@company.com"\n', d)
+o = parse_out(p)
+check("filter quoted value works", o and isinstance(o["result"], list) and len(o["result"]) == 1,
+      f"got {o}")
+
 # --- cleanup report ---
 print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 for name, det in FAIL:
