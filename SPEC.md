@@ -83,6 +83,20 @@ The intended loop: agent runs `--plan`, shows the risk summary to the user, gets
 - `undo` — reverts writes since the last checkpoint (restores previous content or deletes created files); `undo checkpoint=N` targets checkpoint N. API calls recorded with `undo_method`/`undo_url` are reverted with a real HTTP call; others log intent.
 - `resume FILE` — restores a world-state in a **new session** (recreates/deletes tracked files, restores pipeline data).
 
+### let / take — named state
+`let NAME` — bind pipeline data saat ini ke variabel. `take NAME` — ganti pipeline data dengan isi variabel. Memungkinkan multi-branch pipeline dalam satu eksekusi:
+```
+read data.json | let users
+read cfg.json | get meta.total
+take users | filter status=active
+```
+
+### get — nested path access
+`get a.b.c` — dict keys dan list indexes (mis. `get users.0.name`). Key/index tidak ada → structured error dengan hint (keys tersedia / panjang list).
+
+### assert (perluasan)
+`assert type list|dict|str|num` — kontrak tipe antar-stage; mismatch → structured error dengan hint bentuk output.
+
 ## Parsing contract
 
 - Values containing `=`, `>`, `<`, or `|` **must be quoted**: `filter x="a>b"`.

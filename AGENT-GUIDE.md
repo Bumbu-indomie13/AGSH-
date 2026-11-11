@@ -142,5 +142,75 @@ Di Hermes: panggil via terminal/execute_code dengan printf pipe (lihat §2). Unt
 5. `stats.fetch_sources` diperiksa — jangan percaya data fixture bila mengira network
 6. Test suite lulus di mesin target: `python3 tests.py` (42/42)
 
+## 10. Menambah AGSH sebagai tool call di agent runtime
+
+AGSH hanyalah program Python — membungkusnya jadi satu tool = satu file skill/wrapper. Pola minimal:
+
+**Langkah 1 — buat wrapper** (`agsh_tool.py` di mesin agent):
+
+```python
+import json, subprocess
+
+AGSH = "/workspace/agsh/agsh.py"
+
+def agsh_execute(script: str, plan_first: bool = True, flags: list[str] | None = None):
+    """Run one AGSH pipeline. Returns dict with result/error/stats.
+    flags: host-level approvals, e.g. ["--approve"] — NEVER let the model
+    add flags itself; they must come from user consent."""
+    if plan_first:
+        plan = json.loads(subprocess.run(
+            ["python3", AGSH, "--plan"], input=script,
+            capture_output=True, text=True, timeout=30).stdout)
+        if plan["verdict"].startswith(("needs approval", "BLOCKED")):
+            return {"needs_human": True, "plan": plan}
+    r = subprocess.run(["python3", AGSH] + (flags or []), input=script,
+                       capture_output=True, text=True, timeout=120)
+    return json.loads(r.stdout)
+
+# agent tool definition (JSON schema for your runtime):
+# {"name": "agsh_execute",
+#  "description": "Run a token-efficient AGSH pipeline: fetch/filter/transform/
+#                  write files & APIs in ONE call. Use instead of multi-step
+#                  code for orchestration tasks.",
+#  "parameters": {"script": "string (the pipeline)",
+#                 "flags": "array of host approval flags"}}
+```
+
+**Langkah 2 — daftarkan di runtime agent:**
+- Hermes: simpan sebagai skill (`skill_manage`) yang memuat AGENT-GUIDE.md + wrapper; agent memanggil via execute_code/terminal.
+- MCP-based runtime: expose `agsh_execute` sebagai satu MCP tool (roadmap: `agsh --mcp` stdio mode).
+
+**Langkah 3 — aturan penggunaan (masukkan ke system prompt agent):**
+1. Tugas orkestrasi (fetch/filter/transform/write) → tulis pipeline AGSH, bukan Python.
+2. SELALU `--plan` dulu untuk script baru; tampilkan verdict ke user bila `needs approval`/`BLOCKED`.
+3. Flag approval HANYA dari konsen user — agent tidak boleh menambahkan sendiri.
+4. Error JSON dengan `hint` → perbaiki dan retry sekali; `internal:` → laporkan bug.
+
+## 11. Menambah verb baru (prosedur disiplin)
+
+Satu verb = satu method `v_<nama>` di class `Runtime` (`agsh.py`), signature TETAP:
+
+```python
+def v_sort(self, data, subject, kw):
+    self.stats["verbs"] += 1
+    if not isinstance(data, list):
+        raise AGSHError("sort", "input must be a list", got=type(data).__name__)
+    desc = kw.get("desc") == "1"
+    key = subject or None
+    return sorted(data, key=lambda x: (x.get(key) or 0) if isinstance(x, dict) else x,
+                  reverse=desc)
+```
+
+**Checklist WAJIB (melewatkan satu = sandbox/gate bisa bolong, pelajaran dari bug `append`):**
+
+1. Method `v_<nama>` di `Runtime` — raise `AGSHError` (jangan exception lain) untuk semua kegagalan.
+2. Jika verb menyentuh file → panggil `self._check_path(path, "<nama>")`.
+3. Jika verb melakukan network → tambahkan `self._ssrf_guard(url, "<nama>")` + gate approval jika write.
+4. Entri di dict `RISK` (bawah file) — klasifikasi `pure/local-read/local-write/network-*/exec/human/mutating`.
+5. Entri di SPEC.md (grammar + kontrak) dan README (tabel verb).
+6. Test di `tests.py`: happy path + minimal satu negative/error case. Jalankan `python3 tests.py` sampai hijau.
+7. Verb harus stdlib-only dan deterministic — tidak ada random/waktu-sistem di output.
+Referensi implementasi terbaik: `v_get` (nested path, hint kaya), `v_let`/`v_take` (named state), `v_assert type` (kontrak tipe antar-stage).
+
 ---
-AGSH v0.2 | MIT | 42 test, CI GitHub Actions | Repo: github.com/Bumbu-indomie13/AGSH-
+AGSH v0.2 | MIT | 47 test, CI GitHub Actions | Repo: github.com/Bumbu-indomie13/AGSH-

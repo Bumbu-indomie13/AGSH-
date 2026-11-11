@@ -68,6 +68,7 @@ class Runtime:
         self.approve_network_write = approve_network_write
         self.answer = answer
         self.allow_private_net = allow_private_net
+        self.vars = {}         # named state across the pipeline (let/take)
         self.stats = {"round_trips": 1, "lines": 0, "verbs": 0}
 
     # ---- undo-able mutations ----
@@ -254,6 +255,18 @@ class Runtime:
 
     def v_assert(self, data, subject, kw):
         self.stats["verbs"] += 1
+        # type assertion (semantic contract between stages)
+        m = re.match(r"type\s+(list|dict|str|num)", subject or "")
+        if m:
+            want = m.group(1)
+            got = type(data).__name__
+            ok = {"list": isinstance(data, list), "dict": isinstance(data, dict),
+                  "str": isinstance(data, str),
+                  "num": isinstance(data, (int, float)) and not isinstance(data, bool)}[want]
+            if not ok:
+                raise AGSHError("assert", f"expected type {want}, got {got}",
+                                hint="check the previous stage's output shape", got=got)
+            return data
         m = re.match(r"count\s*(>|<|>=|<=|==)\s*(\d+)", subject or "")
         if not m:
             raise AGSHError("assert", "unsupported assertion", got=subject)
@@ -274,6 +287,43 @@ class Runtime:
                 raise AGSHError("guard", f"file not found: {path}", hint="create it or check the path", got=path)
             return data
         raise AGSHError("guard", "unsupported guard", got=subject)
+
+    def v_let(self, data, subject, kw):
+        """let NAME — bind current pipeline data to a named variable."""
+        self.stats["verbs"] += 1
+        if not re.fullmatch(r"[A-Za-z_]\w*", subject or ""):
+            raise AGSHError("let", "variable name must be [A-Za-z_]word", got=subject)
+        self.vars[subject] = data
+        return {"bound": subject, "type": type(data).__name__}
+
+    def v_take(self, data, subject, kw):
+        """take NAME — replace pipeline data with a previously bound variable."""
+        self.stats["verbs"] += 1
+        if subject not in self.vars:
+            raise AGSHError("take", f"unbound variable: {subject}",
+                            hint=f"bound so far: {sorted(self.vars) or 'none'}", got=subject)
+        return self.vars[subject]
+
+    def v_get(self, data, subject, kw):
+        """get a.b.c — nested path access: dict keys and list indexes."""
+        self.stats["verbs"] += 1
+        cur = data
+        for part in (subject or "").split("."):
+            if part == "": continue
+            if isinstance(cur, dict):
+                if part not in cur:
+                    raise AGSHError("get", f"key not found: {part}",
+                                    hint=f"available keys: {sorted(cur)[:10]}", got=subject)
+                cur = cur[part]
+            elif isinstance(cur, list):
+                try:
+                    cur = cur[int(part)]
+                except (ValueError, IndexError):
+                    raise AGSHError("get", f"bad list index: {part}",
+                                    hint=f"list has {len(cur)} items (0..{len(cur)-1})", got=subject)
+            else:
+                raise AGSHError("get", f"cannot index into {type(cur).__name__} at '{part}'", got=subject)
+        return cur
 
     def v_checkpoint(self, data, subject, kw):
         save = kw.get("save")
@@ -432,7 +482,7 @@ class Runtime:
             fn = getattr(self, f"v_{verb}", None)
             if fn is None:
                 raise AGSHError(verb, f"unknown verb '{verb}'",
-                                hint=f"available: fetch post read write append filter pick map search run ask checkpoint guard undo assert")
+                                hint="available: fetch post read write append filter pick map get let take search run ask checkpoint guard undo assert")
             data = fn(data, subject, kw)
         return data
 
@@ -443,6 +493,7 @@ RISK = {
     "guard": "pure", "write": "local-write", "append": "local-write",
     "post": "network-write", "run": "exec", "checkpoint": "safe",
     "undo": "mutating", "ask": "human", "resume": "mutating",
+    "let": "pure", "take": "pure", "get": "pure",
 }
 
 def build_plan(lines):

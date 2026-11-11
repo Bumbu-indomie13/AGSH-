@@ -295,6 +295,31 @@ srv2.shutdown()
 # stats.lines is real now
 check("stats.lines counts pipeline lines", o and o["stats"]["lines"] == 1, f"out={o['stats']}")
 
+# --- 13. SEMANTIC UPGRADE: let/take/get + type assertion ---
+json.dump({"users": [{"n": 1, "name": "A"}, {"n": 2, "name": "B"}],
+           "meta": {"total": 2}}, open(os.path.join(d, "cfg.json"), "w"))
+p = run_script('read cfg.json\n| get meta.total\n| assert type num\n', d)
+o = parse_out(p)
+check("get nested path + assert type", o and o["result"] == 2, f"got {o}")
+
+p = run_script('read cfg.json\n| get users.0.name\n| assert type str\n', d)
+o = parse_out(p)
+check("get dict+list index path", o and o["result"] == "A", f"got {o}")
+
+p = run_script('read data.json\n| let users\n| read cfg.json\n| get meta.total\n| take users\n| pick n\n| assert type list\n| assert count==2\n', d)
+o = parse_out(p)
+check("let/take named state across stages", o and o["result"] == [{"n": 1}, {"n": 2}], f"got {o}")
+
+p = run_script('take nosuchvar\n', d)
+o = parse_out(p)
+check("take unbound var -> structured error with bound list",
+      o and "error" in o and "unbound" in o["error"]["message"], f"out={o}")
+
+p = run_script('read data.json\n| get 0.users\n', d)  # data.json is a list of dicts → key lookup on dict fails
+o = parse_out(p)
+check("get on wrong type -> structured error with hint",
+      o and "error" in o and ("key not found" in o["error"]["message"]), f"out={o}")
+
 # --- cleanup report ---
 print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 for name, det in FAIL:
