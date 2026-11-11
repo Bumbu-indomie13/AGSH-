@@ -28,8 +28,11 @@ def tokenize(line):
         elif c in "\"'":
             in_q, qch = True, c
         elif c == "|":
+            if buf:
+                cur.append(buf)
+                buf = ""
             stages.append(cur)
-            cur, buf = [], ""
+            cur = []
         elif c in " \t":
             if buf:
                 cur.append(buf)
@@ -417,16 +420,34 @@ def build_plan(lines):
         for toks in tokenize(l):
             verb, subject, kw = parse_stage(toks)
             if not verb: continue
+            risk = RISK.get(verb, "unknown")
+            # detect sandbox escapes for path-mutating verbs at plan time
+            if verb in ("write", "append") and subject:
+                try:
+                    real = os.path.realpath(subject)
+                    root = os.path.realpath(os.getcwd())
+                    if not (real == root or real.startswith(root + os.sep)):
+                        risk = "sandbox-escape"
+                except Exception:
+                    pass
             stages.append({"verb": verb, "subject": (subject or "")[:80],
-                           "risk": RISK.get(verb, "unknown")})
+                           "risk": risk})
     counts = {}
     for s in stages: counts[s["risk"]] = counts.get(s["risk"], 0) + 1
     needs = []
     if counts.get("exec"): needs.append("--allow-run")
     if counts.get("network-write"): needs.append("--approve")
+    if counts.get("sandbox-escape"):
+        verdict = "BLOCKED: escapes sandbox (no flag can approve this)"
+        needs = []
+    elif needs:
+        verdict = "needs approval: " + ", ".join(needs)
+    elif counts.get("local-write") or counts.get("mutating"):
+        verdict = "runs without flags but MUTATES local state"
+    else:
+        verdict = "safe to run (all stages read-only/pure)"
     return {"stages": stages, "summary": counts,
-            "approval_required": needs,
-            "verdict": ("needs approval: " + ", ".join(needs)) if needs else "safe to run"}
+            "approval_required": needs, "verdict": verdict}
 
 def main():
     args = sys.argv[1:]

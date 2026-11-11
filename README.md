@@ -4,7 +4,7 @@ A pipe-style DSL designed for AI agents: **token-efficient orchestration that ex
 
 Instead of writing Python for every data-plumbing step (and burning tokens + round-trips doing it), an agent writes 3–6 short AGSH stages that a deterministic interpreter runs in **one** execution — returning structured JSON feedback, delta diffs, and undo-able mutations.
 
-Measured with tiktoken `cl100k_base`: equivalent Python **125 tokens** vs AGSH **37 tokens** (~70% reduction), plus 1 LLM round-trip instead of 5+.
+Measured with tiktoken `cl100k_base` across 3 equivalent task pairs ([benchmark.py](benchmark.py)): Python **297 tokens** vs AGSH **93 tokens** (~69% reduction), plus 1 LLM round-trip instead of 5+.
 
 ## Quick start
 
@@ -73,6 +73,28 @@ See [SPEC.md](SPEC.md) for the full grammar and [examples/](examples/).
 
 The combination AGSH offers — **compact programs whose runtime returns delta-feedback, structured recovery hints, and undoable mutations, behind an informed-permission plan** — is not present in any of the above.
 
+## Token benchmark
+
+Reproduce the README claim yourself:
+
+```bash
+python3 -m pip install tiktoken
+python3 benchmark.py
+```
+
+Outputs per-task token counts (CSV) for 3 equivalent task pairs. Measured: Python **297 tokens** vs AGSH **93 tokens** (~69% reduction). Task 3 bonus: AGSH has `undo`; the Python equivalent cannot roll back.
+
 ## Status
 
 Prototype (~450 lines, stdlib-only Python). All five "unsolved layers" now have first-class answers: cross-session world-state (`checkpoint save=` / `resume`), real API-call undo (`post ... undo_method=DELETE undo_url=...` verified against a live server), informed permission model (`--plan` risk aggregation + `--allow-run`/`--approve` flags), gated+restricted `run`, and `ask` human-gating (exit code 2). Not yet: multi-user audit log, per-verb rate limiting.
+
+## Token benchmark
+
+Reproduce the README claim yourself:
+
+```bash
+python3 -m pip install tiktoken
+python3 benchmark.py
+```
+
+Outputs per-task token counts (CSV) for 3 equivalent task pairs. Measured: Python **231 tokens** vs AGSH **81 tokens** across the 3 tasks (~65

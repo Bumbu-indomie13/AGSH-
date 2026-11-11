@@ -81,6 +81,13 @@ The intended loop: agent runs `--plan`, shows the risk summary to the user, gets
 - `undo` — reverts writes since the last checkpoint (restores previous content or deletes created files); `undo checkpoint=N` targets checkpoint N. API calls recorded with `undo_method`/`undo_url` are reverted with a real HTTP call; others log intent.
 - `resume FILE` — restores a world-state in a **new session** (recreates/deletes tracked files, restores pipeline data).
 
+## Parsing contract
+
+- Values containing `=`, `>`, `<`, or `|` **must be quoted**: `filter x="a>b"`.
+- A token is treated as `key=value` when it contains `=` before any operator sequence (`>=`, `<=`, `==`) — so `assert count>=1` parses as an assertion, not a kwarg.
+- Quoted strings are opaque: a `|` inside quotes never splits a stage.
+- Inline pipes work with or without spaces: `read f.json|pick n` ≡ `read f.json | pick n`.
+
 ## Errors
 
 All failures exit 1 with:

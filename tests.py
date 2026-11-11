@@ -222,6 +222,46 @@ o = parse_out(p)
 check("filter quoted value works", o and isinstance(o["result"], list) and len(o["result"]) == 1,
       f"got {o}")
 
+# --- 11. INLINE PIPE + PLAN VERDICT TIERS (reviewer #2 / DeryClawbot) ---
+json.dump([{"n": 1, "q": "a"}, {"n": 2, "q": "b"}], open(os.path.join(d, "data.json"), "w"))
+p = run_script('read data.json | pick n\n', d)
+o = parse_out(p)
+check("inline pipe happy path", o and o["result"] == [{"n": 1}, {"n": 2}], f"got {o}")
+
+p = run_script('read data.json|pick n\n', d)  # no spaces around pipe
+o = parse_out(p)
+check("inline pipe without spaces (token before | not lost)",
+      o and o["result"] == [{"n": 1}, {"n": 2}], f"got {o}")
+
+p = run_script('read data.json | filter q="a|b" | pick q\n', d)  # pipe inside quotes
+o = parse_out(p)
+check("quoted pipe does not split stage (empty result, no crash)",
+      o and o["result"] == [], f"got {o}")
+
+p = run_script('fetch https://api.example.com/users paginate=results\n| read data.json | pick n\n', d)  # mixed multi-line + inline
+o = parse_out(p)
+check("mixed multi-line + inline pipe parses", o is not None and
+      (o.get("result") == [{"n": 1}, {"n": 2}] or "error" in o), f"got {str(o)[:120]}")
+
+plan_p = sp.run(["python3", AGSH, "--plan"], input='read data.json | pick n\n',
+                capture_output=True, text=True, cwd=d)
+plan = json.loads(plan_p.stdout)
+check("plan verdict tier 1: pure-only -> safe to run",
+      plan["verdict"].startswith("safe to run"), f"got {plan['verdict']}")
+
+plan_p = sp.run(["python3", AGSH, "--plan"], input='write out.json\n',
+                capture_output=True, text=True, cwd=d)
+plan = json.loads(plan_p.stdout)
+check("plan verdict tier 2: local-write -> mutates local state",
+      "MUTATES local state" in plan["verdict"], f"got {plan['verdict']}")
+
+plan_p = sp.run(["python3", AGSH, "--plan"], input='append /tmp/plan_escape_test.txt\n',
+                capture_output=True, text=True, cwd=d)
+plan = json.loads(plan_p.stdout)
+check("plan verdict tier 3: out-of-workdir write -> BLOCKED, no flags offered",
+      plan["verdict"].startswith("BLOCKED") and plan["approval_required"] == [],
+      f"got {plan['verdict']} {plan['approval_required']}")
+
 # --- cleanup report ---
 print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 for name, det in FAIL:
