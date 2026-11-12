@@ -176,6 +176,22 @@ class Runtime:
             raise AGSHError(verb, f"DNS rebinding suspected: {host} resolved to different IPs between check and request",
                             hint="blocked (TOCTOU defense); if intentional, re-run — but investigate the host", got=sorted(now))
 
+    def _resolve_auth_header(self, verb, kw):
+        """auth=$ENVVAR -> Authorization: Bearer <value>. The secret never
+        lands in audit logs, error payloads, or stats - only the variable NAME."""
+        var = kw.get("auth")
+        if not var:
+            return {}
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", var):
+            raise AGSHError(verb, "auth must name an environment variable",
+                            hint="usage: fetch https://api/... auth=MY_TOKEN_VAR", got=var)
+        val = os.environ.get(var)
+        if not val:
+            raise AGSHError(verb, f"environment variable not set: {var}",
+                            hint="export the variable before running agsh (value is never logged)", got=var)
+        self.audit(verb, f"auth from ${var}", "ok", {"env_var": var, "secret": "REDACTED"})
+        return {"Authorization": f"Bearer {val}"}
+
     def _ssrf_guard(self, url, verb):
         """Resolve host and block private/metadata networks by default
         (prompt-injection defense: an agent must not be able to reach
@@ -199,6 +215,42 @@ class Runtime:
         self.audit(verb, url, "ok", {"source": "network", "host": host})
         return "network"
 
+    def _replay_lookup(self, verb, url, cache):
+        """Return cached body for URL or None (cache: JSONL of {url, body})."""
+        if not os.path.exists(cache):
+            return None
+        try:
+            with open(cache) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue  # corrupt line: skip, never crash a replay
+                    if rec.get("url") == url:
+                        self.audit(verb, url, "ok", {"source": "replay", "cache": cache})
+                        return rec.get("body")
+        except OSError as e:
+            raise AGSHError(verb, f"cannot read replay cache: {cache}", got=str(e))
+        return None
+
+    def _record_body(self, verb, url, cache, body):
+        """Upsert {url, body} into JSONL cache (rewrite file; caches are small)."""
+        if not url or os.path.dirname(cache) and not os.path.isdir(os.path.dirname(cache)):
+            raise AGSHError(verb, f"replay cache dir does not exist: {cache}", got=cache)
+        recs = []
+        if os.path.exists(cache):
+            with open(cache) as f:
+                recs = [json.loads(l) for l in f if l.strip()]
+        recs = [r for r in recs if r.get("url") != url]
+        recs.append({"url": url, "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"), "body": body})
+        with open(cache, "w") as f:
+            for r in recs:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        self.audit(verb, url, "ok", {"recorded": cache})
+
     def v_fetch(self, data, url, kw):
         if not re.match(r"https?://", url):
             raise AGSHError("fetch", "url must start with http(s)://", got=url)
@@ -208,6 +260,24 @@ class Runtime:
             raise AGSHError("fetch", f"rate limit exceeded: more than {self.max_fetch} fetch stages in one run",
                             hint="raise --max-fetch on the host if this is intentional, or split the task",
                             got=self.stats["fetches"])
+        # replay: serve from cache, zero network (bypasses ssrf/dns checks BY DESIGN - nothing leaves the box)
+        cache_replay = kw.get("replay")
+        if cache_replay:
+            cached = self._replay_lookup("fetch", url, cache_replay)
+            if cached is not None:
+                self.stats.setdefault("fetch_sources", []).append(f"replay:{url.split('/')[2]}")
+                self.stats["verbs"] += 1
+                return cached
+        # fail-fast retries validation BEFORE any DNS/ssrf work
+        retries = kw.get("retries")
+        attempts = 0
+        if retries is not None:
+            try:
+                attempts = int(retries)
+            except (TypeError, ValueError):
+                raise AGSHError("fetch", "retries must be an integer", hint="usage: fetch URL retries=2", got=retries)
+            if not (0 <= attempts <= 3):
+                raise AGSHError("fetch", "retries must be 0..3", hint="hard cap 3 keeps runs bounded", got=retries)
         source = self._ssrf_guard(url, "fetch")
         if source == "network":
             self._verify_dns_pin(url, "fetch")  # rebinding defense: re-resolve must match the pin
@@ -218,15 +288,34 @@ class Runtime:
             with open(fixture) as f:
                 body = json.load(f)
             # a fixture is the whole dataset — no pagination
+            cache_record = kw.get("record")
+            if cache_record:
+                self._record_body("fetch", url, cache_record, body)  # record fixtures too (replay parity)
+            self.audit("fetch", url, "ok", {"source": "fixture", "host": url.split("/")[2]})  # audit-all-stages: fixture path juga
             self.stats["verbs"] += 1
             return body.get("results", body) if isinstance(body, dict) else body
-        req = urllib.request.Request(url, headers={"Accept": "application/json",
-            "User-Agent": kw.get("ua", "AGSH/0.3 (agent; +https://github.com/Bumbu-indomie13/AGSH-)")})
-        try:
-            with urllib.request.urlopen(req, timeout=15) as r:
-                body = json.loads(r.read().decode())
-        except Exception as e:
-            raise AGSHError("fetch", f"request failed: {e}", got=url)
+        hdrs = {"Accept": "application/json",
+            "User-Agent": kw.get("ua", "AGSH/0.3 (agent; +https://github.com/Bumbu-indomie13/AGSH-)")}
+        hdrs.update(self._resolve_auth_header("fetch", kw))  # auth_env support
+        req = urllib.request.Request(url, headers=hdrs)
+        body = None
+        last_err = None
+        for attempt in range(attempts + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    body = json.loads(r.read().decode())
+                break
+            except AGSHError:
+                raise
+            except Exception as e:
+                last_err = e
+                if attempt < attempts:
+                    time.sleep(0.2 * (attempt + 1))  # linear backoff
+        if body is None:
+            raise AGSHError("fetch", f"request failed after {attempts + 1} attempt(s): {last_err}", got=url)
+        cache_record = kw.get("record")
+        if cache_record:
+            self._record_body("fetch", url, cache_record, body)
         page_field = kw.get("paginate")
         out = body
         if page_field and isinstance(body, dict):
@@ -274,34 +363,48 @@ class Runtime:
             def keep(x):
                 try: return ops[op](float(x.get(f)))
                 except (TypeError, ValueError): return False
-            return [x for x in data if isinstance(x, dict) and keep(x)]
+            _res = [x for x in data if isinstance(x, dict) and keep(x)]
+            self.audit("filter", (subject or "")[:120], "ok", {"out": len(_res) if isinstance(_res, list) else None})  # audit-all-stages
+            return _res
         # substring form: filter FIELD contains TEXT
         m = re.fullmatch(r"([A-Za-z_]\w*)\s+contains\s+(.*)", (subject or "").strip())
         if m:
             f, needle = m.group(1), m.group(2)
-            return [x for x in data if isinstance(x, dict) and needle in str(x.get(f, ""))]
+            _res = [x for x in data if isinstance(x, dict) and needle in str(x.get(f, ""))]
+            self.audit("filter", (subject or "")[:120], "ok", {"out": len(_res) if isinstance(_res, list) else None})  # audit-all-stages
+            return _res
         if kw:
             k, v = next(iter(kw.items()))
-            return [x for x in data if isinstance(x, dict) and str(x.get(k)) == v]
+            _res = [x for x in data if isinstance(x, dict) and str(x.get(k)) == v]
+            self.audit("filter", (subject or "")[:120], "ok", {"out": len(_res) if isinstance(_res, list) else None})  # audit-all-stages
+            return _res
         if subject.startswith("email ends-with"):
             suffix = subject.split()[-1]
-            return [x for x in data if str(x.get("email", "")).endswith(suffix)]
+            _res = [x for x in data if str(x.get("email", "")).endswith(suffix)]
+            self.audit("filter", (subject or "")[:120], "ok", {"out": len(_res) if isinstance(_res, list) else None})  # audit-all-stages
+            return _res
         if kw.get("ends-with"):
-            return [x for x in data if str(x.get("email", "")).endswith(kw["ends-with"])]
+            _res = [x for x in data if str(x.get("email", "")).endswith(kw["ends-with"])]
+            self.audit("filter", (subject or "")[:120], "ok", {"out": len(_res) if isinstance(_res, list) else None})  # audit-all-stages
+            return _res
         raise AGSHError("filter", "unsupported filter form", got=subject)
 
     def v_pick(self, data, subject, kw):
         self.stats["verbs"] += 1
         fields = [f for f in re.split(r"[,\s]+", subject or "") if f]
         if isinstance(data, dict):
-            return {k: data[k] for k in fields if k in data}
+            _res = {k: data[k] for k in fields if k in data}
+            self.audit("pick", (subject or "")[:120], "ok", {"out": len(_res) if isinstance(_res, list) else None})  # audit-all-stages
+            return _res
         out = []
         for x in data:
             if isinstance(x, dict):
                 out.append({k: x[k] for k in fields if k in x})
             else:
                 out.append(x)
-        return out
+        _res = out
+        self.audit("pick", (subject or "")[:120], "ok", {"out": len(_res) if isinstance(_res, list) else None})  # audit-all-stages
+        return _res
 
     def _check_path(self, path, verb):
         """Sandbox: paths must stay inside the working directory."""
@@ -352,7 +455,9 @@ class Runtime:
             if not ok:
                 raise AGSHError("assert", f"expected type {want}, got {got}",
                                 hint="check the previous stage's output shape", got=got)
-            return data
+            _res = data
+            self.audit("assert", (subject or "")[:120], "ok", {})  # audit-all-stages
+            return _res
         m = re.match(r"count\s*(>|<|>=|<=|==)\s*(\d+)", subject or "")
         if not m:
             raise AGSHError("assert", "unsupported assertion", got=subject)
@@ -363,7 +468,9 @@ class Runtime:
         if not ok:
             hint = f"filter returned {n} — check field names exist" if n == 0 else None
             raise AGSHError("assert", f"count {n} not {op} {num}", hint=hint, got=n)
-        return data
+        _res = data
+        self.audit("assert", (subject or "")[:120], "ok", {})  # audit-all-stages
+        return _res
 
     def v_guard(self, data, subject, kw):
         self.stats["verbs"] += 1
@@ -371,7 +478,9 @@ class Runtime:
             path = subject.split("exists", 1)[1].strip()
             if not os.path.exists(path):
                 raise AGSHError("guard", f"file not found: {path}", hint="create it or check the path", got=path)
-            return data
+            _res = data
+            self.audit("guard", (subject or "")[:120], "ok", {})  # audit-all-stages
+            return _res
         raise AGSHError("guard", "unsupported guard", got=subject)
 
     def v_let(self, data, subject, kw):
@@ -381,7 +490,9 @@ class Runtime:
             raise AGSHError("let", "variable name must be [A-Za-z_]word", got=subject)
         self.vars[subject] = data
         self.stats.setdefault("bound", []).append(subject)
-        return data  # pass-through: a let in the middle of a pipeline must not break the flow
+        _res = data  # pass-through: a let in the middle of a pipeline must not break the flow
+        self.audit("let", (subject or "")[:120], "ok", {})  # audit-all-stages
+        return _res
 
     def v_take(self, data, subject, kw):
         """take NAME — replace pipeline data with a previously bound variable."""
@@ -389,7 +500,9 @@ class Runtime:
         if subject not in self.vars:
             raise AGSHError("take", f"unbound variable: {subject}",
                             hint=f"bound so far: {sorted(self.vars) or 'none'}", got=subject)
-        return self.vars[subject]
+        _res = self.vars[subject]
+        self.audit("take", (subject or "")[:120], "ok", {})  # audit-all-stages
+        return _res
 
     def v_get(self, data, subject, kw):
         """get a.b.c — nested path access: dict keys and list indexes."""
@@ -410,7 +523,9 @@ class Runtime:
                                     hint=f"list has {len(cur)} items (0..{len(cur)-1})", got=subject)
             else:
                 raise AGSHError("get", f"cannot index into {type(cur).__name__} at '{part}'", got=subject)
-        return cur
+        _res = cur
+        self.audit("get", (subject or "")[:120], "ok", {})  # audit-all-stages
+        return _res
 
     def v_checkpoint(self, data, subject, kw):
         save = kw.get("save")
@@ -515,7 +630,9 @@ class Runtime:
                 try:
                     if subject in open(p, errors="ignore").read(): out.append(p)
                 except Exception: pass
-        return out
+        _res = out
+        self.audit("search", (subject or "")[:120], "ok", {})  # audit-all-stages
+        return _res
 
     def v_map(self, data, subject, kw):
         self.stats["verbs"] += 1
@@ -594,6 +711,7 @@ class Runtime:
         body = body.encode()
         hdrs = {"Content-Type": "application/json", "Accept": "application/json",
                 "User-Agent": kw.get("ua", "AGSH/0.3 (agent; +https://github.com/Bumbu-indomie13/AGSH-)")}
+        hdrs.update(self._resolve_auth_header("post", kw))  # auth_env support
         req = urllib.request.Request(subject, data=body, method="POST", headers=hdrs)
         try:
             with urllib.request.urlopen(req, timeout=15) as r:
@@ -752,6 +870,17 @@ class Runtime:
                 raise
         return data
 
+def _redact_subject(subject):
+    """Plan-time redaction: URLs must not leak embedded credentials
+    (https://user:pass@host -> https://user:***@host). Mirrors _url_host's
+    acceptance of userinfo; secrets stay out of --plan output."""
+    if not subject:
+        return subject
+    subject = re.sub(r"(https?://[^/@\s:]+:)([^@\s]+)(@)", r"\1***\3", subject)
+    subject = re.sub(r"(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}", r"\1***", subject, flags=re.I)
+    return subject
+
+
 # risk classes for the informed-permission plan
 RISK = {
     "fetch": "network-read", "read": "local-read", "search": "local-read",
@@ -781,7 +910,7 @@ def build_plan(lines):
                         risk = "sandbox-escape"
                 except Exception:
                     pass
-            stages.append({"verb": verb, "subject": (subject or "")[:80],
+            stages.append({"verb": verb, "subject": _redact_subject((subject or ""))[:80],
                            "risk": risk})
     counts = {}
     for s in stages: counts[s["risk"]] = counts.get(s["risk"], 0) + 1

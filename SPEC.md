@@ -20,10 +20,14 @@ quoted     := '"' [^"]* '"' | "'" [^']* "'"
 ## Verbs
 
 ### fetch
-`fetch URL [paginate=FIELD]`
+`fetch URL [paginate=FIELD] [auth=ENVVAR] [record=CACHE.jsonl] [replay=CACHE.jsonl] [retries=N]`
 - URL must match `https?://`.
 - **SSRF guard**: hosts resolving to private/metadata networks (RFC1918, loopback, link-local `169.254.x`, ULA) are **blocked by default** — agents must not be reachable to internal services via prompt injection. Bypass only with the host-level `--allow-private-net` flag.
-- Offline mode: if `fixtures/<host>.json` exists, it is served as the complete dataset (no pagination) instead of the network. **The data source is always disclosed**: `stats.fetch_sources` reports `fixture:<host>` vs `network:<host>` for every fetch — fixture shadowing can never be silent.
+- Offline mode: if `fixtures/<host>.json` exists, it is served as the complete dataset (no pagination) instead of the network. **The data source is always disclosed**: `stats.fetch_sources` reports `fixture:<host>` vs `network:<host>` vs `replay:<host>` for every fetch — fixture shadowing can never be silent.
+- `auth=ENVVAR` — send `Authorization: Bearer <value of $ENVVAR>`; the env var must exist (structured error otherwise) and its value is never logged (audit shows the variable name + `REDACTED`). Applies to `post` too.
+- `record=CACHE.jsonl` — after a successful fetch (network or fixture), upsert `{url, body}` into a JSONL cache keyed by URL.
+- `replay=CACHE.jsonl` — serve the body from cache when the URL is present: zero network, bypasses SSRF/DNS checks by design (nothing leaves the box), still disclosed via `fetch_sources: replay:<host>`. Corrupt cache lines are skipped. Cache miss falls through to normal fetch.
+- `retries=N` (0..3) — validated **before** any DNS/SSRF work (fail-fast); a failed request retries with linear backoff (0.2s × attempt), then raises a structured error including the attempt count.
 - `paginate=FIELD`: repeatedly appends `FIELD` arrays across `?page=N` until empty (max 100 pages). A failing page after ≥1 success — or hitting the 100-page cap — raises a structured error; results are never silently truncated.
 
 ### post
@@ -38,7 +42,11 @@ quoted     := '"' [^"]* '"' | "'" [^']* "'"
 
 ### filter
 - `filter FIELD=VALUE` — string equality on dict field.
+- `filter FIELD contains TEXT` — substring match on dict field (subject-form; e6a32b1).
+- `filter FIELD>NUM` / `>=` / `<` / `<=` — numeric compare; non-numeric/missing values simply don't match (consistent with `=`).
 - `filter email ends-with SUFFIX` — suffix match on `email` field.
+- Form order: relational → contains → FIELD=VALUE → ends-with; a field literally named e.g. `contains` cannot shadow named forms (kw parse order).
+- Legacy fork syntax `contains=STR in=FIELD` is NOT supported upstream — subject-form is the source of truth (e6a32b1, authored Luthfy).
 - Input must be a list, else structured error.
 
 ### pick
