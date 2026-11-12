@@ -63,7 +63,7 @@ quoted     := '"' [^"]* '"' | "'" [^']* "'"
 `search TEXT` — returns file paths whose content contains TEXT.
 
 ### run
-`run CMD [timeout=N]` — shell escape hatch. **Gated**: refused unless the host passes `--allow-run`. When allowed, executes restricted: minimal env (`PATH=/usr/bin:/bin`, `HOME`=working dir), hard timeout (default 15s), stdout/stderr truncated to 2000 chars.
+`run CMD [timeout=N]` — argv-only command execution. **Gated**: the host must pass a non-empty `--allow-run=cmd1,cmd2` list; bare `--allow-run` is insufficient. `argv[0]` must match a host-listed command, shell metacharacters are rejected, and an optional in-script `allow=...` list can only narrow the host list. The process gets a minimal environment and a hard timeout (default 15s); output is truncated to 2000 chars. This is **not an OS sandbox**: allowed programs run with AGSH's filesystem and network permissions.
 
 ### ask
 `ask QUESTION` — human-in-the-loop gate. Without `--answer`: prints `{"needs_human": true, "question": ...}` and exits with code **2**. With `--answer TEXT`: injects the answer and continues.
@@ -71,12 +71,12 @@ quoted     := '"' [^"]* '"' | "'" [^']* "'"
 ## CLI flags (informed permission model)
 
 ```
-agsh.py [--plan] [--allow-run] [--approve] [--answer TEXT] [--allow-private-net]
+agsh.py [--plan] [--allow-run=COMMANDS] [--approve] [--answer TEXT] [--allow-private-net]
         [--allow-llm] [--llm-base URL] [--llm-key KEY] [--llm-model NAME] [--llm-max-input N]
 ```
 
 - `--plan` — analyze without executing: per-stage risk classification (pure / local-read / local-write / network-read / network-write / exec / human / mutating / network-llm) plus an aggregate verdict listing which approval flags are required.
-- `--allow-run` — unlock the `run` verb (restricted execution).
+- `--allow-run=COMMANDS` — allow only listed `argv[0]` commands for `run`; bare `--allow-run` does not authorize execution. This is not OS-level isolation.
 - `--approve` — unlock `post` (network writes).
 - `--answer TEXT` — supply a human decision to resume past an `ask` gate.
 - `--allow-private-net` — unlock `fetch` to private/metadata networks (SSRF guard bypass; use only when intentional).
@@ -110,7 +110,7 @@ read data.json | let users | filter status=active | let active
 ### assert (perluasan)
 `assert type list|dict|str|num` — kontrak tipe antar-stage; mismatch → structured error dengan hint bentuk output.
 
-- `run CMD` — gated by host `--allow-run` (optionally `--allow-run=a,b` as a host-level argv policy). With in-script `allow=a,b` the command runs WITHOUT a shell: argv[0] must be in the list and shell metacharacters (`; & | < > \` $( )) are rejected. Without `allow=`, the command runs through a restricted shell (minimal env, timeout 15s).
+- `run CMD` — gated by host `--allow-run=a,b`; the command runs WITHOUT a shell and `argv[0]` must be host-allowed. In-script `allow=a,b` is optional and can only narrow the host list. Shell metacharacters (`; & | < >` and related operators) are rejected. A minimal environment and timeout reduce exposure but do not sandbox the program from the host user's filesystem or network permissions.
 
 ## DNS-rebinding defense
 

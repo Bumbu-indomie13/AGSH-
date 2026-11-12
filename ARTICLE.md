@@ -38,8 +38,9 @@ day. So AGSH treats security as a first-class language feature:
   mutating or network verbs need explicit human approval. The model *cannot*
   self-approve; the gate lives on the host, not in the script.
 - **Audit everything** — append-only JSONL of every stage, secrets redacted.
-- **Sandbox by default** — path sandbox, SSRF + DNS-rebinding guards, argv-only
-  shell with allowlists, flock on every write, rate limits.
+- **Layered safeguards** — path sandbox for file operations and SSRF/DNS-rebinding
+  guards; `run` is host-allowlisted and argv-only, but is not an OS sandbox. File
+  locks and rate limits add further controls.
 - **Structured errors with hints** — failures say *where* and *what to try*,
   including schema mismatches down to `list[0].field`.
 

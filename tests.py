@@ -114,19 +114,19 @@ plan = json.loads(plan_p.stdout)
 check("plan mode: no execution, aggregate risks", "stages" in plan and "summary" in plan
       and plan["summary"].get("exec") == 1 and plan["summary"].get("network-write") == 1,
       f"got {plan.get('summary')}")
-check("plan verdict requires --allow-run + --approve",
-      set(plan["approval_required"]) == {"--allow-run", "--approve"}, f"got {plan['approval_required']}")
+check("plan verdict requires run command list + --approve",
+      set(plan["approval_required"]) == {"--allow-run=COMMANDS", "--approve"}, f"got {plan['approval_required']}")
 
 # run gated without flag
 p = run_script('run echo hi\n', d)
 o = parse_out(p)
 check("run blocked without --allow-run", o and "error" in o and o["error"]["step"] == "run")
 
-# run allowed with flag, restricted env
-p = sp.run(["python3", AGSH, "--allow-run"], input='run echo $HOME\n', capture_output=True, text=True, cwd=d)
+# bare --allow-run must not permit a script to approve its own executable
+p = sp.run(["python3", AGSH, "--allow-run"], input='run id allow=id\n', capture_output=True, text=True, cwd=d)
 o = json.loads(p.stdout)
-check("run with --allow-run executes restricted (HOME=cwd)",
-      o["result"]["exit_code"] == 0 and o["result"]["stdout"] == d, f"got {o['result']}")
+check("bare --allow-run and script allowlist are insufficient",
+      "error" in o and "host command allowlist is required" in o["error"]["message"], f"got {o}")
 
 # --- 7. HUMAN GATE: ask ---
 p = run_script('ask Continue?\n', d)
@@ -321,19 +321,21 @@ check("get on wrong type -> structured error with hint",
       o and "error" in o and ("key not found" in o["error"]["message"]), f"out={o}")
 
 # --- 14. RUN ALLOWLIST (backlog #1) ---
-p = run_script('run echo hello allow=echo,wc\n', d, extra_flags=["--allow-run"])
+p = run_script('run echo hello allow=echo,wc\n', d, extra_flags=["--allow-run=echo,wc"])
 o = parse_out(p)
 check("run allowlisted command (no shell)", o and o["result"]["exit_code"] == 0
       and o["result"]["stdout"] == "hello", f"out={o}")
-
-p = run_script('run rm -rf . allow=echo,wc\n', d, extra_flags=["--allow-run"])
+p = run_script('run id allow=id\n', d, extra_flags=["--allow-run=echo,wc"])
 o = parse_out(p)
-check("run non-allowlisted command blocked", o and "error" in o
-      and "not in allowlist" in o["error"]["message"], f"out={o}")
-
-p = run_script('run echo hi && rm x allow=echo\n', d, extra_flags=["--allow-run"])
+check("script allowlist cannot widen host allowlist", o and "error" in o
+      and "not in host allowlist" in o["error"]["message"], f"out={o}")
+p = run_script('run echo hi allow=wc\n', d, extra_flags=["--allow-run=echo,wc"])
 o = parse_out(p)
-check("run allowlist mode forbids shell metacharacters", o and "error" in o
+check("script allowlist can narrow host allowlist", o and "error" in o
+      and "not in script allowlist" in o["error"]["message"], f"out={o}")
+p = run_script('run echo hi && rm x allow=echo\n', d, extra_flags=["--allow-run=echo"])
+o = parse_out(p)
+check("run rejects shell metacharacters", o and "error" in o
       and "metacharacters" in o["error"]["message"], f"out={o}")
 
 # --- 15. AUDIT LOG JSONL (backlog #2) ---
@@ -483,10 +485,10 @@ o = parse_out(p)
 check("--allow-run=echo host policy: allowed cmd runs", o and "error" not in o
       and o["result"]["stdout"] == "host-allowed", f"out={o}")
 
-p = run_script('run rm -rf .\n', d, extra_flags=["--allow-run=echo"])
+p = run_script('run id allow=id\n', d, extra_flags=["--allow-run=echo"])
 o = parse_out(p)
-check("--allow-run=echo host policy: non-allowed blocked", o and "error" in o
-      and "not in allowlist" in o["error"]["message"], f"out={o}")
+check("--allow-run=echo host policy cannot be widened in script", o and "error" in o
+      and "not in host allowlist" in o["error"]["message"], f"out={o}")
 
 p = run_script('read data.json | limit 1 | pick n\n', d)
 o = parse_out(p)

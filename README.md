@@ -77,7 +77,7 @@ printf '<pipeline>' | python3 agsh.py --plan
 | **Control flow** | `when COND` — skip remaining stages when a condition fails (audited per stage) |
 | **Mutate safely** | `checkpoint` · `undo` · `resume` — file writes flock-locked, API undo = real HTTP DELETE |
 | **Coordinate** | `lease NAME` — cross-run advisory lease, stale-lease stealing, host `--wait` |
-| **Escape hatch** | `run CMD` (gated, restricted env, argv allowlist) · `search` |
+| **Escape hatch** | `run CMD` (host allowlist, argv-only; not an OS sandbox) · `search` |
 | **Human/LLM** | `ask` (exit 2 human gate) · `llm "PROMPT"` (gated `--allow-llm`) |
 
 Full grammar: [SPEC.md](SPEC.md) · Agent integration guide: [AGENT-GUIDE.md](AGENT-GUIDE.md) · Examples: [examples/](examples/)
@@ -92,7 +92,7 @@ All enforced by the **runtime**, not by model obedience:
 - **Payload validation** — `post` checks required keys & size *before* any network call
 - **Rate limits** — `--max-fetch` caps fetches per run
 - **Audit log** — `--audit PATH` (or `AGSH_AUDIT` env): append-only JSONL of every stage outcome
-- **No-shell `run`** — `run CMD allow=a,b` or host policy `--allow-run=a,b`: argv-only, metacharacters rejected
+- **Host-gated `run`** — requires `--allow-run=a,b`; optional script `allow=` can only narrow that host list. Runs argv-only with metacharacters rejected, but allowed programs retain the AGSH process's filesystem and network permissions (not an OS sandbox).
 - **File locking** — advisory flock on every mutation; concurrent agents get a structured error
 - **Bounded retries** — `retries=0..3`, validated before any DNS work
 

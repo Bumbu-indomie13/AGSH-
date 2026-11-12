@@ -25,7 +25,7 @@ printf '<pipeline AGSH>' | python3 /workspace/agsh/agsh.py [flags]
 
 **Flag host (wajib untuk aksi berisiko — script TIDAK bisa meng-approve dirinya):**
 - `--plan` — analisis tanpa eksekusi: risiko per stage + verdict. SELALU jalankan ini dulu untuk pipeline baru.
-- `--allow-run` — buka verb `run` (shell, restricted env).
+- `--allow-run=cmd1,cmd2` — izinkan hanya executable yang terdaftar untuk `run`; flag polos `--allow-run` tidak cukup. `run` memakai argv tanpa shell, tetapi ini BUKAN OS sandbox: program yang diizinkan tetap punya akses filesystem dan jaringan seperti proses AGSH.
 - `--approve` — buka verb `post` (network write).
 - `--answer "TEXT"` — jawab gate `ask` (exit code 2).
 - `--allow-private-net` — bypass SSRF guard (jarang perlu).
@@ -52,7 +52,7 @@ pick f1,f2                     # project fields (missing = {})
 map lower|upper|strip FIELD    # transformasi string
 map NEWNAME=OLDNAME            # rename field
 search TEXT                    # grep working dir
-run CMD                        # BUTUH --allow-run; restricted: env minimal, timeout 15s
+run CMD                        # BUTUH --allow-run=cmd1,cmd2; argv-only, bukan OS sandbox
 guard file exists PATH         # precondition
 assert count >N               # postcondition (juga < >= <= ==); gagal = hint perbaikan
 checkpoint [save=FILE]         # rollback point; save= = world-state lintas sesi
@@ -142,7 +142,7 @@ Buat file `fixtures/<host>.json` di working dir → `fetch` ke host itu menyajik
 - SSRF: host yang resolve ke IP private/metadata diblok default; plus **DNS-rebinding pin** — resolusi ulang tepat sebelum request harus cocok dengan pin, kalau berbeda → error.
 - `post` divalidasi **sebelum** network call: `keys=` (field wajib, termasuk utk list-of-dicts) + `max_bytes=` (default 1MB).
 - Fetch dibatasi `--max-fetch N` per run (default 20) — kelebihan = structured error, bukan spam senyap.
-- `run` allowlist mode (`run CMD allow=sort,wc`): no shell, argv allowlist, metacharacters rejected — mitigation for shell injection inside `--allow-run`.
+- `run` requires host `--allow-run=cmd1,cmd2`; optional script `allow=` only narrows that list. It uses argv without a shell and rejects metacharacters, but is not an OS sandbox and allowed programs keep the process's filesystem/network permissions.
 - Audit log (`--audit PATH`): append-only JSONL of every stage outcome + network resolve (ts/verb/risk/subject/outcome/cwd).
 - File locking: advisory flock on every mutation; concurrent agents get a structured lock error instead of silent corruption.
 - Pagination cap 100 halaman; gagal/cap = structured error (tidak pernah truncate diam-diam).

@@ -703,34 +703,46 @@ class Runtime:
     def v_run(self, data, subject, kw):
         self.stats["verbs"] += 1
         if not self.allow_run:
-            raise AGSHError("run", "shell execution is gated",
-                            hint="inspect the plan (--plan), then re-run with --allow-run if approved",
+            raise AGSHError("run", "command execution is gated",
+                            hint="inspect the plan (--plan), then re-run with --allow-run=cmd1,cmd2 if approved",
                             got=subject)
-        allow = kw.get("allow") or (",".join(sorted(self.run_allowlist_host)) if self.run_allowlist_host else None)
-        if allow:
-            # allowlist mode: no shell metacharacters, argv[0] must be in the
-            # list, and the command runs WITHOUT a shell (no injection surface)
-            allowed = {x.strip() for x in allow.split(",") if x.strip()}
-            if re.search(r"[;&|<>`$(){}\[\]\\\n]", subject):
-                raise AGSHError("run", "allowlist mode forbids shell metacharacters",
-                                hint="each command must be a plain argv (no pipes, ;, &&, redirects)",
-                                got=subject)
-            argv0 = shlex.split(subject)[0]
-            if argv0 not in allowed:
-                raise AGSHError("run", f"command not in allowlist: {argv0}",
-                                hint=f"allowed: {sorted(allowed)}; extend with allow=a,b in the script or ask the host for --allow-run approval",
+        host_allowed = self.run_allowlist_host or set()
+        if not host_allowed:
+            raise AGSHError("run", "host command allowlist is required",
+                            hint="--allow-run alone is insufficient; use --allow-run=cmd1,cmd2",
+                            got=subject)
+        if not subject or not subject.strip():
+            raise AGSHError("run", "command is required", got=subject)
+        if re.search(r"[;&|<>`$(){}\[\]\\\n]", subject):
+            raise AGSHError("run", "run forbids shell metacharacters",
+                            hint="each command must be a plain argv (no pipes, ;, &&, redirects)",
+                            got=subject)
+        try:
+            argv = shlex.split(subject)
+        except ValueError as e:
+            raise AGSHError("run", f"invalid command: {e}", got=subject)
+        if not argv:
+            raise AGSHError("run", "command is required", got=subject)
+        argv0 = argv[0]
+        if argv0 not in host_allowed:
+            raise AGSHError("run", f"command not in host allowlist: {argv0}",
+                            hint=f"host-allowed commands: {sorted(host_allowed)}",
+                            got=argv0)
+        if "allow" in kw:
+            script_allowed = {x.strip() for x in kw["allow"].split(",") if x.strip()}
+            if not script_allowed:
+                raise AGSHError("run", "script allowlist must name at least one command", got=subject)
+            if argv0 not in script_allowed:
+                raise AGSHError("run", f"command not in script allowlist: {argv0}",
+                                hint=f"script-allowed commands: {sorted(script_allowed)}",
                                 got=argv0)
-            import subprocess
-            env = {"PATH": "/usr/bin:/bin", "HOME": os.getcwd(), "LANG": "C"}
-            r = subprocess.run(shlex.split(subject), capture_output=True, text=True,
-                               timeout=int(kw.get("timeout", 15)), env=env, cwd=os.getcwd())
-        else:
-            import subprocess
-            # restricted execution: minimal env, working-dir-only cwd, hard timeout
-            env = {"PATH": "/usr/bin:/bin", "HOME": os.getcwd(), "LANG": "C"}
-            r = subprocess.run(subject, shell=True, capture_output=True, text=True,
-                               timeout=int(kw.get("timeout", 15)), env=env, cwd=os.getcwd())
-        self.audit("run", subject, "ok", {"exit_code": r.returncode, "allowlisted": bool(allow)})
+        # This is argv-only policy, not an OS sandbox: allowed programs retain
+        # the permissions of the AGSH process (filesystem, network, etc.).
+        import subprocess
+        env = {"PATH": "/usr/bin:/bin", "HOME": os.getcwd(), "LANG": "C"}
+        r = subprocess.run(argv, shell=False, capture_output=True, text=True,
+                           timeout=int(kw.get("timeout", 15)), env=env, cwd=os.getcwd())
+        self.audit("run", subject, "ok", {"exit_code": r.returncode, "allowlisted": True})
         return {"exit_code": r.returncode, "stdout": r.stdout.strip()[:2000],
                 "stderr": r.stderr.strip()[:2000]}
 
@@ -1382,7 +1394,7 @@ def build_plan(lines):
     counts = {}
     for s in stages: counts[s["risk"]] = counts.get(s["risk"], 0) + 1
     needs = []
-    if counts.get("exec"): needs.append("--allow-run")
+    if counts.get("exec"): needs.append("--allow-run=COMMANDS")
     if counts.get("network-write"): needs.append("--approve")
     if counts.get("network-llm"): needs.append("--allow-llm")
     if counts.get("sandbox-escape"):
