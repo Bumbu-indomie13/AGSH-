@@ -57,7 +57,13 @@ def parse_stage(toks):
             pass  # equality op inside subject — never kwargs (PR-2: shadowing reorder)
         elif "=" in t and i > 0 and not re.search(r"(>=|<=|==|>|<)", t):
             k, v = t.split("=", 1)
-            kwargs[k] = v
+            if k == "header":
+                # header=NAME:VALUE may repeat (multi-header support, backlog #1);
+                # only 'header' accumulates — all other keys keep last-wins
+                prev = kwargs.get(k)
+                kwargs[k] = prev + [v] if isinstance(prev, list) else [v]
+            else:
+                kwargs[k] = v
         elif i == 0:
             verb = t
         else:
@@ -68,7 +74,7 @@ class Runtime:
     def __init__(self, dry=False, allow_run=False, approve_network_write=False, answer=None,
                  allow_private_net=False, audit_path=None, max_fetch=20,
                  allow_llm=False, llm_base=None, llm_key=None, llm_model=None,
-                 llm_max_input=8000, run_allowlist_host=None):
+                 llm_max_input=8000, run_allowlist_host=None, llm_cache=None, llm_budget=None):
         self.log = []          # undo log: [(kind, payload)]
         self.checkpoints = []  # indices into log
         self.allow_run = allow_run
@@ -81,9 +87,12 @@ class Runtime:
         self.llm_model = llm_model
         self.llm_max_input = llm_max_input
         self.run_allowlist_host = run_allowlist_host  # host-level policy (e.g. --allow-run=echo,wc)
+        self.llm_cache = llm_cache  # sqlite path: deterministic replay of LLM answers (backlog #3)
+        self.llm_budget = llm_budget  # max LLM calls per run (env AGSH_LLM_BUDGET overrides hard-fail)
         self.vars = {}         # named state across the pipeline (let/take)
         self.audit_path = audit_path
         self._dns_pins = {}    # host -> frozenset of IPs seen at guard time (DNS-rebinding defense)
+        self._llm_calls = 0    # budget counter (llm + summarize-with-llm)
         self.max_fetch = max_fetch
         self.stats = {"round_trips": 1, "lines": 0, "verbs": 0}
 
@@ -195,7 +204,7 @@ class Runtime:
                             hint="blocked (TOCTOU defense); if intentional, re-run — but investigate the host", got=sorted(now))
 
     def _resolve_auth_header(self, verb, kw):
-        """auth=$ENVVAR -> Authorization: Bearer <value>. The secret never
+        """auth=$ENVVAR -> Authorization: Bearer *** The secret never
         lands in audit logs, error payloads, or stats - only the variable NAME."""
         var = kw.get("auth")
         if not var:
@@ -209,6 +218,44 @@ class Runtime:
                             hint="export the variable before running agsh (value is never logged)", got=var)
         self.audit(verb, f"auth from ${var}", "ok", {"env_var": var, "secret": "REDACTED"})
         return {"Authorization": f"Bearer {val}"}
+
+    def _resolve_extra_headers(self, verb, kw):
+        """header=NAME:VALUE (repeatable, parser accumulates into a list).
+        NAME: literal header name, validated (no CR/LF injection).
+        VALUE: either a literal, or a $ENVVAR reference — the env value is
+        resolved at runtime and never lands in audit/error/stats (same
+        contract as auth=). Bare 'header=' is a parse error."""
+        raw = kw.get("header")
+        if not raw:
+            return {}
+        items = raw if isinstance(raw, list) else [raw]
+        out = {}
+        for item in items:
+            if ":" not in item:
+                raise AGSHError(verb, "header must be NAME:VALUE",
+                                hint='usage: header=X-API-Key:$MY_KEY header=Accept:application/xml',
+                                got=item)
+            name, val = item.split(":", 1)
+            name = name.strip()
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+                raise AGSHError(verb, "header name may only contain letters, digits, - and _",
+                                hint="no spaces, no CR/LF injection", got=name)
+            if not val:
+                raise AGSHError(verb, "header value is empty",
+                                hint='use header=X-API-Key:$MY_KEY with an env var', got=item)
+            if val.startswith("$"):
+                var = val[1:]
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", var):
+                    raise AGSHError(verb, "header $ref must name an environment variable",
+                                    hint="usage: header=X-API-Key:$MY_KEY", got=val)
+                env = os.environ.get(var)
+                if not env:
+                    raise AGSHError(verb, f"environment variable not set: {var}",
+                                    hint="export the variable before running agsh (value is never logged)", got=var)
+                self.audit(verb, f"header {name} from ${var}", "ok", {"env_var": var, "secret": "REDACTED"})
+                val = env
+            out[name] = val
+        return out
 
     def _ssrf_guard(self, url, verb):
         """Resolve host and block private/metadata networks by default
@@ -324,6 +371,7 @@ class Runtime:
         hdrs = {"Accept": "application/json",
             "User-Agent": kw.get("ua", "AGSH/0.3 (agent; +https://github.com/Bumbu-indomie13/AGSH-)")}
         hdrs.update(self._resolve_auth_header("fetch", kw))  # auth_env support
+        hdrs.update(self._resolve_extra_headers("fetch", kw))  # header=NAME:VALUE (repeatable, backlog #1)
         req = urllib.request.Request(url, headers=hdrs)
         body = None
         last_err = None
@@ -666,10 +714,55 @@ class Runtime:
         return _res
 
     # ---- LLM verb (bahasa): sub-pertanyaan dijawab DI DALAM pipeline ----
+    def _llm_cache_key(self, payload):
+        """Content-hash key: model+messages+params. Same input => same answer,
+        offline re-run, deterministic benchmarks."""
+        import hashlib
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+    def _llm_cache_get(self, key):
+        if not self.llm_cache:
+            return None
+        import sqlite3
+        try:
+            db = sqlite3.connect(self.llm_cache)
+            row = db.execute("SELECT content FROM llm_cache WHERE k=?", (key,)).fetchone()
+            db.close()
+            return row[0] if row else None
+        except sqlite3.Error:
+            return None  # cache must never break a run
+
+    def _llm_cache_put(self, key, content):
+        if not self.llm_cache:
+            return
+        import sqlite3
+        try:
+            db = sqlite3.connect(self.llm_cache)
+            db.execute("CREATE TABLE IF NOT EXISTS llm_cache (k TEXT PRIMARY KEY, content TEXT, ts TEXT)")
+            db.execute("INSERT OR REPLACE INTO llm_cache VALUES (?,?,datetime('now'))", (key, content))
+            db.commit()
+            db.close()
+        except sqlite3.Error:
+            pass
+
     def _llm_chat(self, system, user, kw, verb):
         """One OpenAI-compatible chat completion. Endpoint MUST be allowlisted
         by the host (--llm-base); the key comes from the host env, never the script."""
         import urllib.request
+        # budget cap (backlog #3): hard-fail when the run exceeds its LLM call allowance
+        budget = self.llm_budget
+        if budget is None:
+            env_b = os.environ.get("AGSH_LLM_BUDGET")
+            if env_b:
+                try:
+                    budget = int(env_b)
+                except ValueError:
+                    raise AGSHError(verb, "AGSH_LLM_BUDGET must be an integer", got=env_b)
+        self._llm_calls += 1
+        if budget is not None and self._llm_calls > budget:
+            raise AGSHError(verb, f"LLM budget exceeded: more than {budget} llm call(s) in one run",
+                            hint="narrow data before llm/summarize, raise --llm-budget, or drop AGSH_LLM_BUDGET",
+                            got=self._llm_calls)
         base = (self.llm_base or os.environ.get("AGSH_LLM_BASE") or "").rstrip("/")
         key = self.llm_key or os.environ.get("AGSH_LLM_KEY") or ""
         model = kw.get("model") or self.llm_model or os.environ.get("AGSH_LLM_MODEL") or "default"
@@ -691,6 +784,13 @@ class Runtime:
             "max_tokens": int(kw.get("max-tokens", 300)),
             "temperature": float(kw.get("temp", 0)),
         }
+        # deterministic cache (backlog #3): serve identical calls from sqlite, zero network
+        cache_key = self._llm_cache_key(payload)
+        cached = self._llm_cache_get(cache_key)
+        if cached is not None:
+            self.stats["llm_cache_hits"] = self.stats.get("llm_cache_hits", 0) + 1
+            self.audit(verb, f"cache hit {cache_key[:12]}", "ok", {"model": model})
+            return cached
         req = urllib.request.Request(base + "/chat/completions",
             data=json.dumps(payload).encode(),
             headers={"Content-Type": "application/json",
@@ -727,6 +827,7 @@ class Runtime:
             raise AGSHError(verb, "LLM returned empty content (budget exhausted by reasoning)",
                             hint="raise max-tokens= (e.g. 1000) or use a non-reasoning model via model=",
                             got=f"finish_reason={finish}")
+        self._llm_cache_put(cache_key, content)  # deterministic replay next run (backlog #3)
         self.stats["llm_calls"] = self.stats.get("llm_calls", 0) + 1
         self.stats["llm_prompt_tokens"] = self.stats.get("llm_prompt_tokens", 0) + usage.get("prompt_tokens", 0)
         self.stats["llm_completion_tokens"] = self.stats.get("llm_completion_tokens", 0) + usage.get("completion_tokens", 0)
@@ -892,6 +993,7 @@ class Runtime:
         hdrs = {"Content-Type": "application/json", "Accept": "application/json",
                 "User-Agent": kw.get("ua", "AGSH/0.3 (agent; +https://github.com/Bumbu-indomie13/AGSH-)")}
         hdrs.update(self._resolve_auth_header("post", kw))  # auth_env support
+        hdrs.update(self._resolve_extra_headers("post", kw))  # header=NAME:VALUE (repeatable, backlog #1)
         req = urllib.request.Request(subject, data=body, method="POST", headers=hdrs)
         try:
             with urllib.request.urlopen(req, timeout=15) as r:
@@ -1152,11 +1254,18 @@ def main():
     llm_max_input = 8000
     if "--llm-max-input" in args:
         llm_max_input = int(args[args.index("--llm-max-input") + 1])
+    llm_cache = None
+    if "--llm-cache" in args:
+        llm_cache = args[args.index("--llm-cache") + 1]
+    llm_budget = None
+    if "--llm-budget" in args:
+        llm_budget = int(args[args.index("--llm-budget") + 1])
     rt = Runtime(allow_run=allow_run, approve_network_write=approve, answer=answer,
                  allow_private_net=allow_private_net, audit_path=audit_path,
                  max_fetch=max_fetch, allow_llm=allow_llm, llm_base=llm_base,
                  llm_key=llm_key, llm_model=llm_model, llm_max_input=llm_max_input,
-                 run_allowlist_host=run_allowlist_host)
+                 run_allowlist_host=run_allowlist_host, llm_cache=llm_cache,
+                 llm_budget=llm_budget)
     data = None
     src = sys.stdin.read()
     lines = [l.strip() for l in src.splitlines() if l.strip() and not l.strip().startswith("#")]

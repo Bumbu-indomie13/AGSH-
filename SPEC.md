@@ -24,7 +24,10 @@ quoted     := '"' [^"]* '"' | "'" [^']* "'"
 - URL must match `https?://`.
 - **SSRF guard**: hosts resolving to private/metadata networks (RFC1918, loopback, link-local `169.254.x`, ULA) are **blocked by default** — agents must not be reachable to internal services via prompt injection. Bypass only with the host-level `--allow-private-net` flag.
 - Offline mode: if `fixtures/<host>.json` exists, it is served as the complete dataset (no pagination) instead of the network. **The data source is always disclosed**: `stats.fetch_sources` reports `fixture:<host>` vs `network:<host>` vs `replay:<host>` for every fetch — fixture shadowing can never be silent.
-- `auth=ENVVAR` — send `Authorization: Bearer <value of $ENVVAR>`; the env var must exist (structured error otherwise) and its value is never logged (audit shows the variable name + `REDACTED`). Applies to `post` too.
+- `auth=ENVVAR` — send `Authorization: Bearer *** of $ENVVAR>`; the env var must exist (structured error otherwise) and its value is never logged (audit shows the variable name + `REDACTED`). Applies to `post` too.
+- `header=NAME:VALUE` — **repeatable** for multi-header APIs (e.g. `header=Accept:application/xml header=X-API-Key:$MY_KEY`). VALUE may be a literal or `$ENVVAR` (resolved at runtime, audit records only the var name + `REDACTED`); header names are validated `[A-Za-z0-9_-]+` (CR/LF injection blocked). Applies to `fetch` and `post`.
+- `--llm-cache FILE` — sqlite cache of LLM answers keyed by hash(model+messages+params): identical re-runs are served with **zero network** (`llm_cache_hits` in stats) — deterministic offline runs.
+- `--llm-budget N` (or env `AGSH_LLM_BUDGET`) — hard-fail with a structured error once a run exceeds N LLM calls (llm/summarize).
 - `record=CACHE.jsonl` — after a successful fetch (network or fixture), upsert `{url, body}` into a JSONL cache keyed by URL.
 - `replay=CACHE.jsonl` — serve the body from cache when the URL is present: zero network, bypasses SSRF/DNS checks by design (nothing leaves the box), still disclosed via `fetch_sources: replay:<host>`. Corrupt cache lines are skipped. Cache miss falls through to normal fetch.
 - `retries=N` (0..3) — validated **before** any DNS/SSRF work (fail-fast); a failed request retries with linear backoff (0.2s × attempt), then raises a structured error including the attempt count.
