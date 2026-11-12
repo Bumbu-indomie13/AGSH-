@@ -5,6 +5,8 @@ All notable changes to AGSH. Dates are 2026 (project started Nov 2026).
 ## [0.7] — 2026-11-12
 
 ### Added
+- **COMPARISON.md** (backlog #9 eval): landscape comparison vs orchestration DSLs (Dhenara DAD, AgenticPipeline, AgentScript, AgentForge YAML) across 3 categories + honest feature matrix
+- `when COND` conditional stage-skip verb (gap found in DSL evaluation): same grammar as `assert`, false condition skips remaining stages/lines with per-stage audit + `stats.skipped_stages`, later `when` re-enables; pure, +5 tests
 - **POSITIONING.md** (backlog #9): honest head-to-head vs code-as-action — `bench/bench_vs_code.py` executes the same 6 tasks both ways for real: **AGSH 127 tok vs Python 359 tok (2.83x), 6 vs 12 round-trips, 6/6 exec+verify both sides**; includes what Python genuinely wins and fair-comparison rules
 - **Official MCP server** `mcp/agsh_mcp.py` (backlog #5): zero-dependency stdio JSON-RPC server exposing `agsh_execute` with the plan-first approval contract baked in; live-tested (initialize/tools/list/tools/call, pure plan vs gated `run`)
 - **Governance pack** (backlog #8): CONTRIBUTING.md (PR workflow, kitchen-sink scope rules, verb checklist, attribution, security-report policy), CODEOWNERS, PR template

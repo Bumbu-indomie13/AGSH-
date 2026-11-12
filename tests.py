@@ -557,6 +557,30 @@ p = run_script('lease stale-1 ttl=0\n| read data.json\n| assert count==2\n', d)
 o = parse_out(p)
 check("stale lease (dead pid) acquirable with ttl=0", o and "error" not in o, f"out={o}")
 
+# --- 23. BACKLOG #9 eval: `when` conditional control flow ---
+p = run_script('read data.json\n| filter q=zzz-nonexistent\n| when count>0\n| write skip_out.json\n| assert count==2\n', d)
+o = parse_out(p)
+check("when false -> remaining stages skipped, run still ok", o and "error" not in o
+      and o.get("stats", {}).get("skipped_stages", 0) >= 2
+      and not os.path.exists(os.path.join(d, "skip_out.json")), f"out={o}")
+
+p = run_script('read data.json\n| when count>0\n| pick q\n', d)
+o = parse_out(p)
+check("when true -> stages run", o and "error" not in o and o.get("result") == [{"q": "a"}, {"q": "b"}], f"out={o}")
+
+p = run_script('read data.json\n| when type dict\n| write never.json\n', d)
+o = parse_out(p)
+check("when type mismatch -> skip write", o and "error" not in o and not os.path.exists(os.path.join(d, "never.json")), f"out={o}")
+
+p = run_script('read data.json\n| when badcond\n', d)
+o = parse_out(p)
+check("when unsupported condition -> structured error", o and "error" in o
+      and "unsupported condition" in o["error"]["message"], f"out={o}")
+
+p = run_script('read data.json\n| when count==2\n| pick q\n', d)
+o = parse_out(p)
+check("when count==N exact", o and "error" not in o and o.get("result") == [{"q": "a"}, {"q": "b"}], f"out={o}")
+
 # --- cleanup report ---
 print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 for name, det in FAIL:

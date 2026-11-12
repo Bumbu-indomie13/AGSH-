@@ -74,6 +74,7 @@ printf '<pipeline>' | python3 agsh.py --plan
 | **Transform** | `filter` (`F=V`, `F>N`, `F contains X`, `F == V`, ends-with) · `pick` · `map` · `regex` · `get a.b.c` · `let` / `take` |
 | **Compose** | `sort` · `limit` · `head` · `tail` · `uniq` · `group` · `count` · `join` · `summarize` |
 | **Verify** | `guard file exists` · `assert count>N` · `assert type list` · `schema SPEC` (path-precise shape contracts) |
+| **Control flow** | `when COND` — skip remaining stages when a condition fails (audited per stage) |
 | **Mutate safely** | `checkpoint` · `undo` · `resume` — file writes flock-locked, API undo = real HTTP DELETE |
 | **Coordinate** | `lease NAME` — cross-run advisory lease, stale-lease stealing, host `--wait` |
 | **Escape hatch** | `run CMD` (gated, restricted env, argv allowlist) · `search` |
@@ -152,6 +153,10 @@ The dangerous path can never happen by accident.
 ## vs code-as-action (smolagents-style): measured, not claimed
 
 [POSITIONING.md](POSITIONING.md) runs the same 6 tasks through **both** artifacts for real ([bench/bench_vs_code.py](bench/bench_vs_code.py)): **AGSH 127 emitted tokens vs Python 359 (2.83x), 6 vs 12 agent round-trips**, both 6/6 executed+verified — plus the structural case: a scannable plan + structural audit vs reviewing generated Turing-complete code, and small-model compliance (a 3B model wrote valid AGSH 10/10; a larger model 10/20). Fair-comparison rules included: tasks where Python wins are named (expressiveness — that's what the `run` escape hatch composes with).
+
+## vs other agent DSLs: landscape comparison
+
+[COMPARISON.md](COMPARISON.md) maps the three DSL categories (orchestration: Dhenara DAD / AgenticPipeline / AgentScript; declarative config: AgentForge YAML; data pipeline: AGSH) with an honest feature matrix — and shows what changed because of it: the `when` conditional verb was added after evaluating the control-flow gap; loops/parallelism were evaluated and **declined** on kitchen-sink grounds (rationale included).
 
 ## Status
 

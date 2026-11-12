@@ -90,6 +90,8 @@ class Runtime:
         self.run_allowlist_host = run_allowlist_host  # host-level policy (e.g. --allow-run=echo,wc)
         self.lease_wait = lease_wait
         self._held_leases = []  # (name, fd) — released at process exit
+        self._skip = False      # set by a false `when` — remaining stages of the line are skipped
+        self._skipped = 0
         self.llm_cache = llm_cache  # sqlite path: deterministic replay of LLM answers (backlog #3)
         self.llm_budget = llm_budget  # max LLM calls per run (env AGSH_LLM_BUDGET overrides hard-fail)
         self.vars = {}         # named state across the pipeline (let/take)
@@ -558,6 +560,34 @@ class Runtime:
             raise AGSHError("assert", f"count {n} not {op} {num}", hint=hint, got=n)
         _res = data
         return _res
+
+    def v_when(self, data, subject, kw):
+        """when COND — conditional control flow (gap vs orchestration DSLs, backlog #9 eval).
+        COND uses the same grammar as assert: `count OP N` | `type T`.
+        True  -> data passes through, remaining stages run.
+        False -> remaining stages of THIS line are skipped (stats.skipped_stages),
+                 data passes through unchanged; the run still succeeds."""
+        self.stats["verbs"] += 1
+        m = re.match(r"type\s+(list|dict|str|num)", subject or "")
+        if m:
+            want = m.group(1)
+            ok = {"list": isinstance(data, list), "dict": isinstance(data, dict),
+                  "str": isinstance(data, str),
+                  "num": isinstance(data, (int, float)) and not isinstance(data, bool)}[want]
+        else:
+            m = re.match(r"count\s*(>|<|>=|<=|==)\s*(\d+)", subject or "")
+            if not m:
+                raise AGSHError("when", "unsupported condition",
+                                hint="conditions: count OP N | type T — same grammar as assert", got=subject)
+            op, num = m.group(1), int(m.group(2))
+            n = len(data) if isinstance(data, list) else 1
+            ok = {">": n > num, "<": n < num, ">=": n >= num,
+                  "<=": n <= num, "==": n == num}[op]
+        if not ok:
+            self._skip = True
+        else:
+            self._skip = False  # a later `when` re-evaluates and can re-enable skipped stages
+        return data  # pass-through either way
 
     def v_guard(self, data, subject, kw):
         self.stats["verbs"] += 1
@@ -1282,10 +1312,15 @@ class Runtime:
         stages = tokenize(line)
         for toks in stages:
             verb, subject, kw = parse_stage(toks)
+            if self._skip and verb != "when":
+                self._skipped += 1
+                self.stats["skipped_stages"] = self.stats.get("skipped_stages", 0) + 1
+                self.audit(verb, subject, "skipped", {"reason": "when"})
+                continue
             fn = getattr(self, f"v_{verb}", None)
             if fn is None:
                 raise AGSHError(verb, f"unknown verb '{verb}'",
-                                hint="available: fetch post read write append filter pick map get let take search run ask checkpoint guard undo resume assert sort group count head tail uniq regex join llm summarize lines")
+                                hint="available: fetch post read write append filter pick map get let take search run ask checkpoint guard undo resume assert when sort group count head tail uniq regex join llm summarize lines schema lease")
             try:
                 data = fn(data, subject, kw)
                 if verb not in ("fetch","write","post","run","append","undo","resume"):
@@ -1322,6 +1357,7 @@ RISK = {
     "tail": "pure", "uniq": "pure", "regex": "pure", "join": "local-read",
     "limit": "pure",  # was documented but never implemented — caught in real use (v0.5)
     "schema": "pure",      # inter-stage shape contract (backlog #4)
+    "when": "pure",        # conditional stage-skip (control-flow gap eval, backlog #9)
     "lease": "coordination",  # cross-run advisory lease (backlog #2); host --wait N retries
 }
 
