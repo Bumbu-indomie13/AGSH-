@@ -5,7 +5,7 @@
 """
 import json, os, subprocess, tempfile, sys
 
-HERE = "/home/agentuser/agsh"
+HERE = os.path.dirname(os.path.abspath(__file__))
 AGSH = os.path.join(HERE, "agsh.py")
 PASS, FAIL = [], []
 
