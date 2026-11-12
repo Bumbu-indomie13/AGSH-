@@ -9,12 +9,102 @@ delta-feedback (written counts, diffs) instead of silent success.
 """
 import json, os, sys, re, copy, time, socket, shlex, fcntl, datetime
 import urllib.request, urllib.error
+import http.client, ipaddress, urllib.parse
 from contextlib import contextmanager
+
+NAT64_WELL_KNOWN_PREFIX = ipaddress.ip_network("64:ff9b::/96")
 
 class AGSHError(Exception):
     def __init__(self, step, msg, hint=None, got=None):
         self.step, self.msg, self.hint, self.got = step, msg, hint, got
         super().__init__(f"[{step}] {msg}" + (f" | hint: {hint}" if hint else "") + (f" | got: {got}" if got is not None else ""))
+
+def _normalized_url_host(url):
+    host = urllib.parse.urlsplit(url).hostname
+    if host is None:
+        raise ValueError("URL has no hostname")
+    try:
+        return ipaddress.ip_address(host).compressed
+    except ValueError:
+        return host.rstrip(".").encode("idna").decode("ascii").lower()
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, host, pinned_ip, **kwargs):
+        self._pinned_ip = pinned_ip
+        super().__init__(host, **kwargs)
+
+    def connect(self):
+        # Connect to the numeric address validated for this request; never
+        # resolve the hostname again between the guard and the socket connect.
+        self.sock = socket.create_connection((self._pinned_ip, self.port),
+                                             self.timeout, self.source_address)
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, host, pinned_ip, **kwargs):
+        self._pinned_ip = pinned_ip
+        super().__init__(host, **kwargs)
+
+    def connect(self):
+        self.sock = socket.create_connection((self._pinned_ip, self.port),
+                                             self.timeout, self.source_address)
+        if self._tunnel_host:
+            self._tunnel()
+        server_hostname = self._tunnel_host or self.host
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=server_hostname)
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, pins):
+        self._pins = pins
+        super().__init__()
+
+    def http_open(self, req):
+        host = _normalized_url_host(req.full_url)
+        pin = self._pins.get(host)
+        if pin is None:
+            raise urllib.error.URLError("request destination was not validated")
+        return self.do_open(lambda conn_host, **kw: _PinnedHTTPConnection(
+            conn_host, pinned_ip=pin, **kw), req)
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, pins):
+        self._pins = pins
+        super().__init__()
+
+    def https_open(self, req):
+        host = _normalized_url_host(req.full_url)
+        pin = self._pins.get(host)
+        if pin is None:
+            raise urllib.error.URLError("request destination was not validated")
+        return self.do_open(lambda conn_host, **kw: _PinnedHTTPSConnection(
+            conn_host, pinned_ip=pin, **kw), req,
+            context=self._context)
+
+class _SSRFRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def __init__(self, runtime, verb, pins):
+        self._runtime, self._verb, self._pins = runtime, verb, pins
+        super().__init__()
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urllib.parse.urljoin(req.full_url, newurl)
+        self._runtime._pin_destination(target, self._verb, self._pins)
+        redirected = super().redirect_request(req, fp, code, msg, headers, target)
+        if redirected is None:
+            return None
+        old = self._runtime._parse_http_url(req.full_url, self._verb)
+        new = self._runtime._parse_http_url(target, self._verb)
+        if (old["scheme"], old["host"], old["port"]) != (new["scheme"], new["host"], new["port"]):
+            # Do not forward credentials or caller-defined headers to a new
+            # origin; do not replay a write body across origins.
+            if redirected.get_method() not in ("GET", "HEAD"):
+                return None
+            headers = dict(redirected.headers)
+            headers.update(redirected.unredirected_hdrs)
+            safe = {k: v for k, v in headers.items()
+                    if k.lower() in ("accept", "user-agent", "accept-encoding")}
+            return urllib.request.Request(target, data=redirected.data, headers=safe,
+                origin_req_host=req.origin_req_host, unverifiable=True,
+                method=redirected.get_method())
+        return redirected
 
 def tokenize(line):
     """Split a pipeline line into stage TOKEN LISTS, honoring quotes:
@@ -176,10 +266,10 @@ class Runtime:
                         undone.append(f"BLOCKED undo for {payload['method']} {payload['url']}: {e}")
                         continue
                     try:
-                        req = urllib.request.Request(uu, method=um,
-                            headers={"Content-Type": "application/json"})
                         body = json.dumps(payload.get("body")).encode() if um == "POST" else None
-                        with urllib.request.urlopen(req, data=body, timeout=15) as r:
+                        req = urllib.request.Request(uu, data=body, method=um,
+                            headers={"Content-Type": "application/json"})
+                        with self._safe_urlopen(req, timeout=15, verb="undo") as r:
                             status = r.status
                         undone.append(f"undone API {payload['method']} {payload['url']} -> {um} {uu} (HTTP {status})")
                     except Exception as e:
@@ -189,24 +279,84 @@ class Runtime:
         return undone
 
     # ---- built-ins ----
-    PRIVATE_NET_RE = re.compile(
-        r"^(127\.|10\.|192\.168\.|169\.254\.|0\.0\.0\.0|::1|fe80:|fc00:|fd)"
-        r"|^172\.(1[6-9]|2\d|3[01])\.")
+    def _parse_http_url(self, url, verb):
+        if not isinstance(url, str) or not url or "\\" in url or any(ord(c) <= 32 or ord(c) == 127 for c in url):
+            raise AGSHError(verb, "invalid HTTP URL", got=url)
+        try:
+            parts = urllib.parse.urlsplit(url)
+            port = parts.port
+            raw_host = parts.hostname
+        except (ValueError, UnicodeError) as e:
+            raise AGSHError(verb, "invalid HTTP URL", got=str(e))
+        scheme = parts.scheme.lower()
+        if scheme not in ("http", "https") or not parts.netloc or raw_host is None:
+            raise AGSHError(verb, "URL must be an absolute http(s) URL with a hostname", got=url)
+        if parts.username is not None or parts.password is not None:
+            raise AGSHError(verb, "URL user-info is not allowed", got=url)
+        if "%" in raw_host:
+            raise AGSHError(verb, "percent-encoded or scoped URL host is not allowed", got=raw_host)
+        try:
+            host = ipaddress.ip_address(raw_host).compressed
+        except ValueError:
+            try:
+                host = raw_host.rstrip(".").encode("idna").decode("ascii").lower()
+            except UnicodeError as e:
+                raise AGSHError(verb, "invalid URL hostname", got=str(e))
+        port = port if port is not None else (443 if scheme == "https" else 80)
+        if not host or not 1 <= port <= 65535:
+            raise AGSHError(verb, "invalid URL hostname or port", got=url)
+        return {"parts": parts, "scheme": scheme, "host": host, "port": port}
 
     def _url_host(self, url):
-        return url.split("/")[2].split("@")[-1].split(":")[0]
+        return self._parse_http_url(url, "fetch")["host"]
 
     def _resolve_ips(self, host):
-        return {i[4][0] for i in socket.getaddrinfo(host, None)}
+        records = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        return {ipaddress.ip_address(item[4][0].split("%", 1)[0]).compressed
+                for item in records}
 
     def _verify_dns_pin(self, url, verb):
-        """DNS-rebinding defense: the IPs seen NOW must equal the IPs seen at
-        guard time — otherwise the host may have rebound to a private IP."""
-        host = self._url_host(url)
+        """Compatibility check for callers that need to compare a stored DNS set."""
+        host = self._parse_http_url(url, verb)["host"]
         now = self._resolve_ips(host)
         if now != self._dns_pins.get(host):
             raise AGSHError(verb, f"DNS rebinding suspected: {host} resolved to different IPs between check and request",
                             hint="blocked (TOCTOU defense); if intentional, re-run — but investigate the host", got=sorted(now))
+
+    def _pin_destination(self, url, verb, pins):
+        """Validate every DNS result and pin the socket transport to one of them."""
+        parsed = self._parse_http_url(url, verb)
+        host = parsed["host"]
+        try:
+            ips = self._resolve_ips(host)
+        except Exception as e:
+            raise AGSHError(verb, f"cannot resolve host: {host}", got=str(e))
+        if not ips:
+            raise AGSHError(verb, f"cannot resolve host: {host}")
+        for ip in ips:
+            address = ipaddress.ip_address(ip)
+            checked_address = address.ipv4_mapped if getattr(address, "ipv4_mapped", None) else address
+            if address.version == 6 and address in NAT64_WELL_KNOWN_PREFIX:
+                checked_address = ipaddress.IPv4Address(int(address) & 0xffffffff)
+            if not self.allow_private_net and not checked_address.is_global:
+                raise AGSHError(verb, f"host {host} resolves to private/metadata IP {ip}",
+                                hint="blocked by default (SSRF guard); re-run with --allow-private-net if this is intentional",
+                                got=ip)
+        pin = sorted(ips, key=lambda value: (ipaddress.ip_address(value).version,
+                                             int(ipaddress.ip_address(value))))[0]
+        pins[host] = pin
+        self._dns_pins[host] = frozenset(ips)
+        return parsed
+
+    def _safe_urlopen(self, req, timeout, verb):
+        """Open HTTP(S) directly to validated IPs; revalidate each redirect hop."""
+        pins = {}
+        self._pin_destination(req.full_url, verb, pins)
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),  # proxies hide the actual destination from this pin
+            _PinnedHTTPHandler(pins), _PinnedHTTPSHandler(pins),
+            _SSRFRedirectHandler(self, verb, pins))
+        return opener.open(req, timeout=timeout)
 
     def _resolve_auth_header(self, verb, kw):
         """auth=$ENVVAR -> Authorization: Bearer *** The secret never
@@ -245,6 +395,9 @@ class Runtime:
             if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
                 raise AGSHError(verb, "header name may only contain letters, digits, - and _",
                                 hint="no spaces, no CR/LF injection", got=name)
+            if name.lower() == "host":
+                raise AGSHError(verb, "Host header cannot be overridden; it must match the validated URL",
+                                got=name)
             if not val:
                 raise AGSHError(verb, "header value is empty",
                                 hint='use header=X-API-Key:$MY_KEY with an env var', got=item)
@@ -263,26 +416,13 @@ class Runtime:
         return out
 
     def _ssrf_guard(self, url, verb):
-        """Resolve host and block private/metadata networks by default
-        (prompt-injection defense: an agent must not be able to reach
-        internal services or cloud metadata endpoints)."""
-        host = url.split("/")[2].split("@")[-1].split(":")[0]
-        if os.path.exists(os.path.join("fixtures", url.split("/")[2] + ".json")):
+        """Block non-global destinations by default and establish a DNS pin."""
+        parsed = self._parse_http_url(url, verb)
+        fixture = os.path.join("fixtures", parsed["parts"].netloc + ".json")
+        if os.path.exists(fixture):
             return "fixture"
-        if self.allow_private_net:
-            self._dns_pins[host] = frozenset(self._resolve_ips(host))
-            return "network"
-        try:
-            ips = self._resolve_ips(host)
-        except Exception as e:
-            raise AGSHError(verb, f"cannot resolve host: {host}", got=str(e))
-        for ip in ips:
-            if self.PRIVATE_NET_RE.match(ip):
-                raise AGSHError(verb, f"host {host} resolves to private/metadata IP {ip}",
-                                hint="blocked by default (SSRF guard); re-run with --allow-private-net if this is intentional",
-                                got=ip)
-        self._dns_pins[host] = frozenset(ips)  # pinned for rebinding check
-        self.audit(verb, url, "ok", {"source": "network", "host": host})
+        self._pin_destination(url, verb, self._dns_pins)
+        self.audit(verb, url, "ok", {"source": "network", "host": parsed["host"]})
         return "network"
 
     def _replay_lookup(self, verb, url, cache):
@@ -322,13 +462,8 @@ class Runtime:
         self.audit(verb, url, "ok", {"recorded": cache})
 
     def _pin_host(self, url, verb):
-        """Resolve + pin the host (must be called before any network write).
-        Blocks private/metadata networks by default and pins resolved IPs so
-        a later DNS-rebinding check can compare."""
-        source = self._ssrf_guard(url, verb)
-        if source == "network":
-            self._verify_dns_pin(url, verb)
-        return source
+        """Preflight a network destination; the transport pins again at connect time."""
+        return self._ssrf_guard(url, verb)
 
     def v_fetch(self, data, url, kw):
         if not re.match(r"https?://", url):
@@ -358,8 +493,6 @@ class Runtime:
             if not (0 <= attempts <= 3):
                 raise AGSHError("fetch", "retries must be 0..3", hint="hard cap 3 keeps runs bounded", got=retries)
         source = self._ssrf_guard(url, "fetch")
-        if source == "network":
-            self._verify_dns_pin(url, "fetch")  # rebinding defense: re-resolve must match the pin
         self.stats.setdefault("fetch_sources", []).append(f"{source}:{url.split('/')[2]}")
         # offline demo mode: serve from ./fixtures/<host>.json if present
         fixture = os.path.join("fixtures", url.split("/")[2] + ".json")
@@ -382,7 +515,7 @@ class Runtime:
         last_err = None
         for attempt in range(attempts + 1):
             try:
-                with urllib.request.urlopen(req, timeout=15) as r:
+                with self._safe_urlopen(req, timeout=15, verb="fetch") as r:
                     body = json.loads(r.read().decode())
                 break
             except AGSHError:
@@ -429,7 +562,7 @@ class Runtime:
             req = urllib.request.Request(f"{url}{sep}page={page}", headers={
                 "Accept": "application/json",
                 "User-Agent": "AGSH/0.3 (agent; +https://github.com/Bumbu-indomie13/AGSH-)"})
-            with urllib.request.urlopen(req, timeout=15) as r:
+            with self._safe_urlopen(req, timeout=15, verb="fetch") as r:
                 return json.loads(r.read().decode()).get(field, [])
         except Exception:
             return None  # distinguishable from an empty page []
@@ -1041,8 +1174,10 @@ class Runtime:
         hdrs.update(self._resolve_extra_headers("post", kw))  # header=NAME:VALUE (repeatable, backlog #1)
         req = urllib.request.Request(subject, data=body, method="POST", headers=hdrs)
         try:
-            with urllib.request.urlopen(req, timeout=15) as r:
+            with self._safe_urlopen(req, timeout=15, verb="post") as r:
                 status, resp = r.status, r.read().decode()[:500]
+        except AGSHError:
+            raise
         except Exception as e:
             raise AGSHError("post", f"request failed: {e}", got=subject)
         self._log_api("POST", subject, data, undo_method, undo_url)
