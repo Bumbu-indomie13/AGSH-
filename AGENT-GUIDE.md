@@ -60,6 +60,10 @@ undo [checkpoint=N]            # revert mutasi sejak checkpoint (file byte-per-b
 resume FILE                    # restore world-state di sesi baru
 ask QUESTION                   # human gate: exit 2 + {"needs_human": true}
 sort [FIELD] [desc=1] | limit N | head N | tail N | uniq [FIELD] | group FIELD | count | regex FIELD=PATTERN | join FIELD
+schema SPEC                    # kontrak bentuk antar-stage: list[dict[id:num,name:str]], dst.
+                               # mismatch = structured error DENGAN PATH persis ([0].n: expected num)
+lease NAME [ttl=S]             # koordinasi antar-run: flock-backed, auto-release saat run selesai,
+                               # lease basi (pid mati > ttl) diambil alih otomatis; host --wait N = retry
 --- Dery fork (LLM integration) ---
 llm "INSTRUKSI" [model=M] [max-tokens=N] [max-input=N] [temp=F]
                                # BUTUH --allow-llm + --llm-base; kirim pipeline data ke

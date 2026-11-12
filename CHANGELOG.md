@@ -2,6 +2,16 @@
 
 All notable changes to AGSH. Dates are 2026 (project started Nov 2026).
 
+## [0.7] — 2026-11-12
+
+### Added
+- `lease NAME [ttl=S]` cross-run coordination verb (backlog #2): flock-backed advisory lease, structured contention error, stale-lease stealing (dead PID past ttl), host `--wait N` retry window; released at run end (success or error)
+- `schema SPEC` inter-stage shape contracts (backlog #4): recursive spec grammar (`list[dict[id:num,name:str]]`), errors carry the exact path of the first mismatch
+- unittest suite in CI (8th suite); `header=NAME:VALUE` documented on fetch/post
+
+### Fixed
+- `limit` verb was documented but never implemented — now alias of `head N` (caught in real-use sanity probe)
+
 ## [0.5] — 2026-11-12
 
 ### Added

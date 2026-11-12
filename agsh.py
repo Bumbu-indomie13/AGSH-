@@ -74,7 +74,8 @@ class Runtime:
     def __init__(self, dry=False, allow_run=False, approve_network_write=False, answer=None,
                  allow_private_net=False, audit_path=None, max_fetch=20,
                  allow_llm=False, llm_base=None, llm_key=None, llm_model=None,
-                 llm_max_input=8000, run_allowlist_host=None, llm_cache=None, llm_budget=None):
+                 llm_max_input=8000, run_allowlist_host=None, llm_cache=None, llm_budget=None,
+                 lease_wait=0):
         self.log = []          # undo log: [(kind, payload)]
         self.checkpoints = []  # indices into log
         self.allow_run = allow_run
@@ -87,6 +88,8 @@ class Runtime:
         self.llm_model = llm_model
         self.llm_max_input = llm_max_input
         self.run_allowlist_host = run_allowlist_host  # host-level policy (e.g. --allow-run=echo,wc)
+        self.lease_wait = lease_wait
+        self._held_leases = []  # (name, fd) — released at process exit
         self.llm_cache = llm_cache  # sqlite path: deterministic replay of LLM answers (backlog #3)
         self.llm_budget = llm_budget  # max LLM calls per run (env AGSH_LLM_BUDGET overrides hard-fail)
         self.vars = {}         # named state across the pipeline (let/take)
@@ -1054,6 +1057,139 @@ class Runtime:
         composition-verbs commit but only implemented in v0.5."""
         return self.v_head(data, subject, kw)
 
+    def v_schema(self, data, subject, kw):
+        """schema SPEC — inter-stage shape contract (backlog #4).
+        SPEC grammar: base | list[spec] | dict[base] | dict{k:spec,...}
+        base: str | num | bool | list | dict | any
+        Errors carry the exact path of the first mismatch."""
+        self.stats["verbs"] += 1
+        spec = (subject or "").strip()
+        if not spec:
+            raise AGSHError("schema", "missing schema spec",
+                            hint="e.g. schema list[dict[id:num,name:str]]", got=spec)
+
+        def parse(s):  # recursive spec parser -> ("base",name) | ("list",inner) | ("dictk",inner) | ("dictf",{...})
+            s = s.strip()
+            if s.startswith("list[") and s.endswith("]"):
+                return ("list", parse(s[5:-1]))
+            if s.startswith("dict[") and s.endswith("]"):
+                inner = s[5:-1].strip()
+                if re.fullmatch(r"[a-z]+", inner):
+                    return ("dictk", parse(inner))
+                fields = {}
+                depth, cur, parts = 0, "", []
+                for c in inner:
+                    if c == "[":
+                        depth += 1
+                    elif c == "]":
+                        depth -= 1
+                    if c == "," and depth == 0:
+                        parts.append(cur); cur = ""
+                    else:
+                        cur += c
+                if cur: parts.append(cur)
+                for p in parts:
+                    k, _, t = p.partition(":")
+                    if not k.strip() or not t.strip():
+                        raise AGSHError("schema", f"bad field spec: {p}",
+                                        hint="fields look like dict[id:num,name:str]", got=inner)
+                    fields[k.strip()] = parse(t)
+                return ("dictf", fields)
+            if not re.fullmatch(r"str|num|bool|list|dict|any", s):
+                raise AGSHError("schema", f"unknown type in spec: {s}",
+                                hint="types: str num bool list dict any", got=s)
+            return ("base", s)
+
+        def check(node, sp, path):
+            kind, val = sp
+            def typeok(n, t):
+                return {"str": isinstance(n, str), "num": isinstance(n, (int, float)) and not isinstance(n, bool),
+                        "bool": isinstance(n, bool), "list": isinstance(n, list),
+                        "dict": isinstance(n, dict), "any": True}[t]
+            if kind == "base":
+                if not typeok(node, val):
+                    raise AGSHError("schema", f"type mismatch at {path or '<root>'}: expected {val}, got {type(node).__name__}",
+                                    hint="fix the producing stage or relax the schema", got=path)
+                return
+            if kind == "list":
+                if not isinstance(node, list):
+                    raise AGSHError("schema", f"type mismatch at {path or '<root>'}: expected list, got {type(node).__name__}", got=path)
+                for i, item in enumerate(node):
+                    check(item, val, f"{path}[{i}]" if path else f"[{i}]")
+                return
+            if kind == "dictk":
+                if not isinstance(node, dict):
+                    raise AGSHError("schema", f"type mismatch at {path or '<root>'}: expected dict, got {type(node).__name__}", got=path)
+                for k, v in node.items():
+                    check(v, val, f"{path}.{k}" if path else k)
+                return
+            if kind == "dictf":
+                if not isinstance(node, dict):
+                    raise AGSHError("schema", f"type mismatch at {path or '<root>'}: expected dict, got {type(node).__name__}", got=path)
+                for k, tsp in val.items():
+                    if k not in node:
+                        raise AGSHError("schema", f"missing key at {path or '<root>'}: {k}",
+                                        hint=f"required keys: {sorted(val)}", got=sorted(node))
+                    check(node[k], tsp, f"{path}.{k}" if path else k)
+
+        check(data, parse(spec), "")
+        return data
+
+    # ---- cross-run lease (backlog #2) ----
+    def v_lease(self, data, subject, kw):
+        """lease NAME — acquire a cross-run advisory lease (flock-backed).
+        A second run with the same lease name gets a structured error until the
+        holder exits (or is detected dead past ttl=). Host --wait N retries."""
+        self.stats["verbs"] += 1
+        name = (subject or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name):
+            raise AGSHError("lease", "lease name must be [A-Za-z0-9_-]{1,64}", got=name)
+        lock_path = self._check_path(f".{name}.lease", "lease")
+        try:
+            f = open(lock_path, "a+")
+        except OSError as e:
+            raise AGSHError("lease", f"cannot create lease file: {e}", got=lock_path)
+        deadline = time.time() + float(kw.get("wait", self.lease_wait))
+        while True:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break  # acquired
+            except OSError:
+                # crash-safety: steal stale leases whose holder died past ttl
+                try:
+                    meta = json.load(open(lock_path)) if os.path.getsize(lock_path) else {}
+                    holder, ts = meta.get("pid"), float(meta.get("ts", 0))
+                    ttl = float(kw.get("ttl", 300))
+                    if holder and not os.path.exists(f"/proc/{holder}") and time.time() - ts > ttl:
+                        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                except Exception:
+                    pass
+                if time.time() >= deadline:
+                    f.close()
+                    raise AGSHError("lease", f"lease held by another run: {name}",
+                                    hint="wait for the other run to finish (or host --wait N to retry); stale leases are stolen automatically after ttl=",
+                                    got=name)
+                time.sleep(0.2)
+        try:
+            f.seek(0); f.truncate()
+            f.write(json.dumps({"pid": os.getpid(), "ts": time.time(), "name": name}))
+            f.flush()
+        except Exception:
+            pass
+        self._held_leases.append((name, f))
+        self.audit("lease", name, "ok", {"path": lock_path})
+        return data  # pass-through
+
+    def release_leases(self):
+        for name, f in getattr(self, "_held_leases", []):
+            try:
+                fcntl.flock(f, fcntl.LOCK_UN)
+            except Exception:
+                pass
+            f.close()
+        self._held_leases = []
+
     def v_head(self, data, subject, kw):
         self.stats["verbs"] += 1
         if not isinstance(data, list):
@@ -1185,6 +1321,8 @@ RISK = {
     "sort": "pure", "group": "pure", "count": "pure", "head": "pure",
     "tail": "pure", "uniq": "pure", "regex": "pure", "join": "local-read",
     "limit": "pure",  # was documented but never implemented — caught in real use (v0.5)
+    "schema": "pure",      # inter-stage shape contract (backlog #4)
+    "lease": "coordination",  # cross-run advisory lease (backlog #2); host --wait N retries
 }
 
 def build_plan(lines):
@@ -1244,6 +1382,9 @@ def main():
     max_fetch = 20
     if "--max-fetch" in args:
         max_fetch = int(args[args.index("--max-fetch") + 1])
+    lease_wait = 0
+    if "--wait" in args:
+        lease_wait = float(args[args.index("--wait") + 1])  # lease acquisition retry window (backlog #2)
     answer = None
     if "--answer" in args:
         answer = args[args.index("--answer") + 1]
@@ -1271,7 +1412,7 @@ def main():
                  max_fetch=max_fetch, allow_llm=allow_llm, llm_base=llm_base,
                  llm_key=llm_key, llm_model=llm_model, llm_max_input=llm_max_input,
                  run_allowlist_host=run_allowlist_host, llm_cache=llm_cache,
-                 llm_budget=llm_budget)
+                 llm_budget=llm_budget, lease_wait=lease_wait)
     data = None
     src = sys.stdin.read()
     lines = [l.strip() for l in src.splitlines() if l.strip() and not l.strip().startswith("#")]
@@ -1283,17 +1424,20 @@ def main():
         try:
             data = rt.execute_line(l, data)
         except AGSHError as e:
+            rt.release_leases()
             print(json.dumps({"error": {"step": e.step, "message": e.msg,
                                         "hint": e.hint, "got": e.got},
                               "stats": rt.stats}, ensure_ascii=False))
             sys.exit(1)
         except Exception as e:
+            rt.release_leases()
             # contract: no tracebacks cross the boundary — even internal bugs
             print(json.dumps({"error": {"step": "?", "message":
                                         f"internal: {e.__class__.__name__}: {e}",
                                         "hint": "report this as a bug — internal error leaked"},
                               "stats": rt.stats}, ensure_ascii=False))
             sys.exit(1)
+    rt.release_leases()  # leases are advisory for the run's lifetime; free them on success
     out = {"result": data, "stats": rt.stats}
     print(json.dumps(out, indent=2, ensure_ascii=False))
 

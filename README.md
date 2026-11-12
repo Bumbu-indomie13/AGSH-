@@ -2,7 +2,7 @@
 
 ![CI](https://github.com/Bumbu-indomie13/AGSH-/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Tests](https://img.shields.io/badge/tests-116%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-127%20passing-brightgreen)
 ![Python](https://img.shields.io/badge/python-3.10%2B-informational)
 ![Dependencies](https://img.shields.io/badge/dependencies-zero-9cf)
 
@@ -73,8 +73,9 @@ printf '<pipeline>' | python3 agsh.py --plan
 | **Data in/out** | `fetch` · `post` · `read` · `write` · `append` · `lines` |
 | **Transform** | `filter` (`F=V`, `F>N`, `F contains X`, `F == V`, ends-with) · `pick` · `map` · `regex` · `get a.b.c` · `let` / `take` |
 | **Compose** | `sort` · `limit` · `head` · `tail` · `uniq` · `group` · `count` · `join` · `summarize` |
-| **Verify** | `guard file exists` · `assert count>N` · `assert type list` |
+| **Verify** | `guard file exists` · `assert count>N` · `assert type list` · `schema SPEC` (path-precise shape contracts) |
 | **Mutate safely** | `checkpoint` · `undo` · `resume` — file writes flock-locked, API undo = real HTTP DELETE |
+| **Coordinate** | `lease NAME` — cross-run advisory lease, stale-lease stealing, host `--wait` |
 | **Escape hatch** | `run CMD` (gated, restricted env, argv allowlist) · `search` |
 | **Human/LLM** | `ask` (exit 2 human gate) · `llm "PROMPT"` (gated `--allow-llm`) |
 
@@ -98,7 +99,7 @@ All enforced by the **runtime**, not by model obedience:
 
 ```bash
 python3 tests.py              # 70 checks: sandbox escapes, SSRF, DNS pin, undo, scale, determinism...
-for t in test_*.py; do python3 $t.py; done   # +46 feature checks (auth-env, record/replay,
+for t in test_*.py; do python3 $t.py; done   # +46 feature checks + unittest suite (auth-env, record/replay,
                                              # plan-redact, audit-all, relational filter, llm verbs)
 ```
 

@@ -134,6 +134,15 @@ Recommended for any shared/production use; the host wrapper should always pass `
 
 All file mutations (`write`, `append`, `resume` restores) take an advisory `flock` on `<path>.agshlock`. A second process mutating the same file gets a structured `file is locked by another process` error (retry hint included). Stale `.agshlock` files are safe to delete.
 
+### lease — cross-run coordination (backlog #2)
+`lease NAME [ttl=SECONDS]` — acquires a flock-backed advisory lease (file `.<name>.lease`, PID + timestamp inside). A second run with the same lease name gets a structured error until the holder's run exits. Stale leases (holder PID dead, age > ttl, default 300s) are stolen automatically. Host `--wait N` retries acquisition for N seconds. Leases are released when the run ends (success or error). Pass-through verb.
+
+### schema — inter-stage shape contract (backlog #4)
+`schema SPEC` — declares the expected shape of the incoming pipeline data. SPEC grammar:
+`base` | `list[spec]` | `dict[base]` | `dict{k:spec,...}` where base ∈ `str|num|bool|list|dict|any`.
+Examples: `schema list[dict]` · `schema list[dict[id:num,name:str]]` · `schema dict[users:list,meta:dict[total:num]]`.
+Mismatch → structured error carrying the **exact path** of the first failure (e.g. `type mismatch at [0].n: expected num, got str`) or `missing key at <root>: k`. Pure; `--plan` shows it as a pure stage.
+
 ## Parsing contract
 
 - Values containing `=`, `>`, `<`, or `|` **must be quoted**: `filter x="a>b"`.
