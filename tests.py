@@ -488,6 +488,15 @@ o = parse_out(p)
 check("--allow-run=echo host policy: non-allowed blocked", o and "error" in o
       and "not in allowlist" in o["error"]["message"], f"out={o}")
 
+p = run_script('read data.json | limit 1 | pick n\n', d)
+o = parse_out(p)
+check("limit N exists and slices (doc-verb regression)", o and "error" not in o
+      and o["result"] == [{"n": 1}], f"out={o}")
+
+p = run_script('read data.json | limit\n', d)
+o = parse_out(p)
+check("limit default N=10", o and "error" not in o, f"out={o}")
+
 # --- cleanup report ---
 print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 for name, det in FAIL:

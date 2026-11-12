@@ -1049,6 +1049,11 @@ class Runtime:
         n = len(data) if isinstance(data, (list, dict, str)) else (1 if data is not None else 0)
         return {"count": n}
 
+    def v_limit(self, data, subject, kw):
+        """limit N — first N items (alias of head N); documented since the
+        composition-verbs commit but only implemented in v0.5."""
+        return self.v_head(data, subject, kw)
+
     def v_head(self, data, subject, kw):
         self.stats["verbs"] += 1
         if not isinstance(data, list):
@@ -1179,6 +1184,7 @@ RISK = {
     # PR2 composition verbs (by @DeryClawbot): pure unless reading a file
     "sort": "pure", "group": "pure", "count": "pure", "head": "pure",
     "tail": "pure", "uniq": "pure", "regex": "pure", "join": "local-read",
+    "limit": "pure",  # was documented but never implemented — caught in real use (v0.5)
 }
 
 def build_plan(lines):
