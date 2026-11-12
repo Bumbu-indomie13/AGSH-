@@ -107,7 +107,7 @@ read data.json | let users | filter status=active | let active
 ### assert (perluasan)
 `assert type list|dict|str|num` — kontrak tipe antar-stage; mismatch → structured error dengan hint bentuk output.
 
-- `run CMD` — gated by host `--allow-run`. With `allow=a,b` the command runs WITHOUT a shell: argv[0] must be in the list and shell metacharacters (`; & | < > \` $( )) are rejected. Without `allow=`, the command runs through a restricted shell (minimal env, timeout 15s).
+- `run CMD` — gated by host `--allow-run` (optionally `--allow-run=a,b` as a host-level argv policy). With in-script `allow=a,b` the command runs WITHOUT a shell: argv[0] must be in the list and shell metacharacters (`; & | < > \` $( )) are rejected. Without `allow=`, the command runs through a restricted shell (minimal env, timeout 15s).
 
 ## DNS-rebinding defense
 
@@ -123,7 +123,7 @@ read data.json | let users | filter status=active | let active
 
 ## Audit log
 
-`--audit PATH` — append-only JSONL. One record per stage outcome (and per network resolve):
+`--audit PATH` (or `AGSH_AUDIT` env; the flag wins) — append-only JSONL. One record per stage outcome (and per network resolve):
 `{"ts": "<iso8601>", "verb": "...", "risk": "...", "subject": "...", "outcome": "ok"|"error", "cwd": "...", ...extra}`.
 Recommended for any shared/production use; the host wrapper should always pass `--audit`.
 
@@ -134,6 +134,7 @@ All file mutations (`write`, `append`, `resume` restores) take an advisory `floc
 ## Parsing contract
 
 - Values containing `=`, `>`, `<`, or `|` **must be quoted**: `filter x="a>b"`.
+- `;` is a stage separator equivalent to `|` (multi-stage on one line); `;` inside quotes is safe.
 - A token is treated as `key=value` when it contains `=` before any operator sequence (`>=`, `<=`, `==`) — so `assert count>=1` parses as an assertion, not a kwarg.
 - Quoted strings are opaque: a `|` inside quotes never splits a stage.
 - Inline pipes work with or without spaces: `read f.json|pick n` ≡ `read f.json | pick n`.

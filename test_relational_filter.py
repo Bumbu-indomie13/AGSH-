@@ -50,7 +50,8 @@ check("filter tag contains x", o.get("result") == [{"id": 1}, {"id": 3}, {"id": 
 
 # regression: suite lama masih hijau (65 sejak merge filter+verbs; >=61 juga ok jika upstream tumbuh)
 p = subprocess.run(["python3", "tests.py"], capture_output=True, text=True, timeout=120, cwd=HERE)
-check("upstream suite tetap PASS (65)", "65 passed, 0 failed" in p.stdout, p.stdout[-120:])
+check("upstream suite tetap PASS (>=65, 0 failed)", "0 failed" in p.stdout and int(
+    next(l for l in p.stdout.splitlines() if "passed" in l).split()[1]) >= 65, p.stdout[-120:])
 
 print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 sys.exit(1 if FAIL else 0)

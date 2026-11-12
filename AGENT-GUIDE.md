@@ -185,7 +185,11 @@ def agsh_execute(script: str, plan_first: bool = True, flags: list[str] | None =
             return {"needs_human": True, "plan": plan}
     r = subprocess.run(["python3", AGSH] + (flags or []), input=script,
                        capture_output=True, text=True, timeout=120)
-    return json.loads(r.stdout)
+    try:
+        return json.loads(r.stdout)
+    except Exception:
+        return {"internal": "agsh produced no valid JSON",
+                "raw": (r.stdout or "")[:300], "stderr": (r.stderr or "")[:300]}
 
 # agent tool definition (JSON schema for your runtime):
 # {"name": "agsh_execute",

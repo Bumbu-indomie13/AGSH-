@@ -459,6 +459,35 @@ o = parse_out(p)
 check("filter relational with non-numeric operand -> structured error", o and "error" in o
       and o["error"]["step"] == "filter", f"out={o}")
 
+# --- 20. REVIEW 3: ';' separator, AGSH_AUDIT env, --allow-run=a,b ---
+p = run_script('read data.json; pick n; assert count==2\n', d)   # ';' = stage separator
+o = parse_out(p)
+check("';' terminates a stage (multi-stage one line)", o and "error" not in o
+      and o["result"] == [{"n": 1}, {"n": 2}], f"out={o}")
+
+p = run_script('read data.json | filter q="a;b"\n', d)   # ';' inside quotes safe
+o = parse_out(p)
+check("';' inside quotes not split", o and "error" not in o and o["result"] == [], f"out={o}")
+
+import os as _os
+env_audit = os.path.join(d, "env_audit.jsonl")
+p = subprocess.run(["python3", AGSH], input="read data.json\n| pick n\n", capture_output=True,
+                   text=True, cwd=d, env=dict(_os.environ, AGSH_AUDIT=env_audit))
+recs = [json.loads(l) for l in open(env_audit)] if _os.path.exists(env_audit) else []
+check("AGSH_AUDIT env enables audit without --audit flag",
+      p.returncode == 0 and any(r.get("verb") == "pick" for r in recs), f"recs={recs}")
+_os.remove(env_audit)
+
+p = run_script('run echo host-allowed\n', d, extra_flags=["--allow-run=echo"])
+o = parse_out(p)
+check("--allow-run=echo host policy: allowed cmd runs", o and "error" not in o
+      and o["result"]["stdout"] == "host-allowed", f"out={o}")
+
+p = run_script('run rm -rf .\n', d, extra_flags=["--allow-run=echo"])
+o = parse_out(p)
+check("--allow-run=echo host policy: non-allowed blocked", o and "error" in o
+      and "not in allowlist" in o["error"]["message"], f"out={o}")
+
 # --- cleanup report ---
 print(f"\n==== {len(PASS)} passed, {len(FAIL)} failed ====")
 for name, det in FAIL:

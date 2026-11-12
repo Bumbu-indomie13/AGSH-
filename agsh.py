@@ -29,7 +29,8 @@ def tokenize(line):
                 buf += c
         elif c in "\"'":
             in_q, qch = True, c
-        elif c == "|":
+        elif c == "|" or c == ";":
+            # '|' and ';' both terminate a stage (';' per AGENT-GUIDE §13 review)
             if buf:
                 cur.append(buf)
                 buf = ""
@@ -67,7 +68,7 @@ class Runtime:
     def __init__(self, dry=False, allow_run=False, approve_network_write=False, answer=None,
                  allow_private_net=False, audit_path=None, max_fetch=20,
                  allow_llm=False, llm_base=None, llm_key=None, llm_model=None,
-                 llm_max_input=8000):
+                 llm_max_input=8000, run_allowlist_host=None):
         self.log = []          # undo log: [(kind, payload)]
         self.checkpoints = []  # indices into log
         self.allow_run = allow_run
@@ -79,6 +80,7 @@ class Runtime:
         self.llm_key = llm_key
         self.llm_model = llm_model
         self.llm_max_input = llm_max_input
+        self.run_allowlist_host = run_allowlist_host  # host-level policy (e.g. --allow-run=echo,wc)
         self.vars = {}         # named state across the pipeline (let/take)
         self.audit_path = audit_path
         self._dns_pins = {}    # host -> frozenset of IPs seen at guard time (DNS-rebinding defense)
@@ -623,7 +625,7 @@ class Runtime:
             raise AGSHError("run", "shell execution is gated",
                             hint="inspect the plan (--plan), then re-run with --allow-run if approved",
                             got=subject)
-        allow = kw.get("allow")
+        allow = kw.get("allow") or (",".join(sorted(self.run_allowlist_host)) if self.run_allowlist_host else None)
         if allow:
             # allowlist mode: no shell metacharacters, argv[0] must be in the
             # list, and the command runs WITHOUT a shell (no injection surface)
@@ -1121,10 +1123,14 @@ def main():
         print(VERSION)
         return
     plan_only = "--plan" in args
-    allow_run = "--allow-run" in args
+    allow_run = "--allow-run" in args or any(a.startswith("--allow-run=") for a in args)
+    run_allowlist_host = None
+    for a in args:
+        if a.startswith("--allow-run="):  # host-level policy: --allow-run=echo,wc
+            run_allowlist_host = {x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()}
     approve = "--approve" in args
     allow_private_net = "--allow-private-net" in args
-    audit_path = None
+    audit_path = os.environ.get("AGSH_AUDIT")  # env default (review 3 #6); --audit overrides
     if "--audit" in args:
         audit_path = args[args.index("--audit") + 1]
     max_fetch = 20
@@ -1149,7 +1155,8 @@ def main():
     rt = Runtime(allow_run=allow_run, approve_network_write=approve, answer=answer,
                  allow_private_net=allow_private_net, audit_path=audit_path,
                  max_fetch=max_fetch, allow_llm=allow_llm, llm_base=llm_base,
-                 llm_key=llm_key, llm_model=llm_model, llm_max_input=llm_max_input)
+                 llm_key=llm_key, llm_model=llm_model, llm_max_input=llm_max_input,
+                 run_allowlist_host=run_allowlist_host)
     data = None
     src = sys.stdin.read()
     lines = [l.strip() for l in src.splitlines() if l.strip() and not l.strip().startswith("#")]
