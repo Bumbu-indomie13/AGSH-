@@ -44,13 +44,55 @@ p = run_script('read log.jsonl\n| llm "x"\n', d, ["--allow-llm"])
 o = json.loads(p.stdout)
 check("llm without --llm-base -> structured error", "error" in o and "endpoint" in o["error"]["message"].lower())
 
-# 5. REAL llm call against 9router
+# 5. REAL llm call: prefer local 9router; fall back to a local OpenAI-compatible
+#    mock server so the test is reproducible anywhere (CI / fresh clones)
 key = None
 cfgp = os.path.expanduser("~/.hermes/config.yaml")
 if os.path.exists(cfgp):
-    import yaml
-    key = (yaml.safe_load(open(cfgp)).get("model") or {}).get("api_key")
-env = dict(os.environ, AGSH_LLM_BASE="http://127.0.0.1:20133/v1", AGSH_LLM_KEY=key or "",
+    try:
+        import yaml
+        key = (yaml.safe_load(open(cfgp)).get("model") or {}).get("api_key")
+    except Exception:
+        key = None
+
+def _endpoint_alive(base):
+    try:
+        urllib.request.urlopen(base.rstrip("/") + "/models", timeout=2)
+        return True
+    except Exception:
+        return False
+
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading, urllib.request
+class _MockLLM(BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        n = "?"
+        try:
+            n = body["messages"][-1]["content"]
+        except Exception:
+            pass
+        resp = json.dumps({"choices": [{"message": {"content": f"Mock answer (input tail: {str(n)[-40:]})"}}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(resp)))
+        self.end_headers()
+        self.wfile.write(resp)
+    def do_GET(self):
+        resp = json.dumps({"data": [{"id": "mock-1"}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(resp)))
+        self.end_headers()
+        self.wfile.write(resp)
+    def log_message(self, *a): pass
+
+BASE = "http://127.0.0.1:20133/v1"
+if not _endpoint_alive(BASE):  # 9router not running here -> start local mock
+    _srv = HTTPServer(("127.0.0.1", 0), _MockLLM)
+    BASE = f"http://127.0.0.1:{_srv.server_address[1]}/v1"
+    threading.Thread(target=_srv.serve_forever, daemon=True).start()
+env = dict(os.environ, AGSH_LLM_BASE=BASE, AGSH_LLM_KEY=key or "",
            AGSH_LLM_MODEL="utama-1m")
 p = subprocess.run(["python3", AGSH, "--allow-llm"], cwd=d, env=env,
                    input='read log.jsonl\n| lines\n| filter status=fail\n| count\n| llm "Berapa banyak error? Jawab satu kalimat." max-tokens=60\n',

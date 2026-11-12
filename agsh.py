@@ -397,38 +397,32 @@ class Runtime:
                 try: return ops[op](float(x.get(f)))
                 except (TypeError, ValueError): return False
             _res = [x for x in data if isinstance(x, dict) and keep(x)]
-            self.audit("filter", (subject or "")[:120], "ok", {"out": len(_res) if isinstance(_res, list) else None})  # audit-all-stages
             return _res
         # substring form: filter FIELD contains TEXT
         m = re.fullmatch(r"([A-Za-z_]\w*)\s+contains\s+(.*)", (subject or "").strip())
         if m:
             f, needle = m.group(1), m.group(2)
             _res = [x for x in data if isinstance(x, dict) and needle in str(x.get(f, ""))]
-            self.audit("filter", (subject or "")[:120], "ok", {"out": len(_res) if isinstance(_res, list) else None})  # audit-all-stages
             return _res
         # suffix form: filter FIELD ends-with TEXT (generic — was hardcoded to email)
         m = re.fullmatch(r"([A-Za-z_]\w*)\s+ends-with\s+(\S+)", (subject or "").strip())
         if m:
             f, suffix = m.group(1), m.group(2)
             _res = [x for x in data if isinstance(x, dict) and str(x.get(f, "")).endswith(suffix)]
-            self.audit("filter", (subject or "")[:120], "ok", {"out": len(_res) if isinstance(_res, list) else None})  # audit-all-stages
             return _res
         if kw:
             k, v = next(iter(kw.items()))
             _res = [x for x in data if isinstance(x, dict) and str(x.get(k)) == v]
-            self.audit("filter", (subject or "")[:120], "ok", {"out": len(_res) if isinstance(_res, list) else None})  # audit-all-stages
             return _res
         # equality form: filter FIELD == VALUE — string equality (PR-2, DeryClaw)
         m = re.fullmatch(r"([A-Za-z_]\w*)\s*==\s*(.+)", (subject or "").strip())
         if m:
             f, val = m.group(1), m.group(2).strip().strip("\"'")
             _res = [x for x in data if isinstance(x, dict) and str(x.get(f)) == val]
-            self.audit("filter", (subject or "")[:120], "ok", {"out": len(_res) if isinstance(_res, list) else None})  # audit-all-stages
             return _res
         if subject.startswith("email ends-with"):
             suffix = subject.split()[-1]
             _res = [x for x in data if str(x.get("email", "")).endswith(suffix)]
-            self.audit("filter", (subject or "")[:120], "ok", {"out": len(_res) if isinstance(_res, list) else None})  # audit-all-stages
             return _res
         raise AGSHError("filter", "unsupported filter form",
                         hint="use: filter FIELD=VALUE | filter FIELD>NUM | filter FIELD contains TEXT | filter FIELD ends-with TEXT", got=subject)
@@ -438,7 +432,6 @@ class Runtime:
         fields = [f for f in re.split(r"[,\s]+", subject or "") if f]
         if isinstance(data, dict):
             _res = {k: data[k] for k in fields if k in data}
-            self.audit("pick", (subject or "")[:120], "ok", {"out": len(_res) if isinstance(_res, list) else None})  # audit-all-stages
             return _res
         out = []
         for x in data:
@@ -447,7 +440,6 @@ class Runtime:
             else:
                 out.append(x)
         _res = out
-        self.audit("pick", (subject or "")[:120], "ok", {"out": len(_res) if isinstance(_res, list) else None})  # audit-all-stages
         return _res
 
     def _check_path(self, path, verb):
@@ -500,7 +492,6 @@ class Runtime:
                 raise AGSHError("assert", f"expected type {want}, got {got}",
                                 hint="check the previous stage's output shape", got=got)
             _res = data
-            self.audit("assert", (subject or "")[:120], "ok", {})  # audit-all-stages
             return _res
         m = re.match(r"count\s*(>|<|>=|<=|==)\s*(\d+)", subject or "")
         if not m:
@@ -513,7 +504,6 @@ class Runtime:
             hint = f"filter returned {n} — check field names exist" if n == 0 else None
             raise AGSHError("assert", f"count {n} not {op} {num}", hint=hint, got=n)
         _res = data
-        self.audit("assert", (subject or "")[:120], "ok", {})  # audit-all-stages
         return _res
 
     def v_guard(self, data, subject, kw):
@@ -523,7 +513,6 @@ class Runtime:
             if not os.path.exists(path):
                 raise AGSHError("guard", f"file not found: {path}", hint="create it or check the path", got=path)
             _res = data
-            self.audit("guard", (subject or "")[:120], "ok", {})  # audit-all-stages
             return _res
         raise AGSHError("guard", "unsupported guard", got=subject)
 
@@ -535,7 +524,6 @@ class Runtime:
         self.vars[subject] = data
         self.stats.setdefault("bound", []).append(subject)
         _res = data  # pass-through: a let in the middle of a pipeline must not break the flow
-        self.audit("let", (subject or "")[:120], "ok", {})  # audit-all-stages
         return _res
 
     def v_take(self, data, subject, kw):
@@ -545,7 +533,6 @@ class Runtime:
             raise AGSHError("take", f"unbound variable: {subject}",
                             hint=f"bound so far: {sorted(self.vars) or 'none'}", got=subject)
         _res = self.vars[subject]
-        self.audit("take", (subject or "")[:120], "ok", {})  # audit-all-stages
         return _res
 
     def v_get(self, data, subject, kw):
@@ -568,7 +555,6 @@ class Runtime:
             else:
                 raise AGSHError("get", f"cannot index into {type(cur).__name__} at '{part}'", got=subject)
         _res = cur
-        self.audit("get", (subject or "")[:120], "ok", {})  # audit-all-stages
         return _res
 
     def v_checkpoint(self, data, subject, kw):
@@ -675,7 +661,6 @@ class Runtime:
                     if subject in open(p, errors="ignore").read(): out.append(p)
                 except Exception: pass
         _res = out
-        self.audit("search", (subject or "")[:120], "ok", {})  # audit-all-stages
         return _res
 
     # ---- LLM verb (bahasa): sub-pertanyaan dijawab DI DALAM pipeline ----
@@ -1059,7 +1044,7 @@ class Runtime:
             try:
                 data = fn(data, subject, kw)
                 if verb not in ("fetch","write","post","run","append","undo","resume"):
-                    self.audit(verb, subject, "ok")  # all-stage audit (PR-2, DeryClaw)
+                    self.audit(verb, subject, "ok", {"out": len(data) if isinstance(data, list) else None})  # all-stage audit (PR-2, DeryClaw)
             except AGSHError:
                 self.audit(verb, subject, "error")
                 raise
