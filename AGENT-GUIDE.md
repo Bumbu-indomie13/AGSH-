@@ -39,7 +39,7 @@ printf '<pipeline AGSH>' | python3 /workspace/agsh/agsh.py [flags]
 ## 3. Verb reference (16 + 3 Dery-fork)
 
 ```
-fetch URL [paginate=FIELD] [auth=ENVVAR] [record=C.jsonl] [replay=C.jsonl] [retries=0-3]
+fetch URL [paginate=F] [auth=ENVVAR] [header=NAME:VAL ...] [record=C.jsonl] [replay=C.jsonl] [retries=0-3] · post URL keys=a,b [max_bytes=N] [header=NAME:VAL ...]
                                # HTTP GET JSON; auto-pagination; SSRF guard + DNS pin;
                                # auth=ENVVAR -> Bearer dari env (secret tak pernah di-log);
                                # record/replay = JSONL cache (offline deterministik);
