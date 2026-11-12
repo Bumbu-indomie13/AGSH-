@@ -39,7 +39,11 @@ printf '<pipeline AGSH>' | python3 /workspace/agsh/agsh.py [flags]
 ## 3. Verb reference (16)
 
 ```
-fetch URL [paginate=FIELD]     # HTTP GET JSON; auto-pagination; SSRF guard aktif
+fetch URL [paginate=FIELD] [auth=ENVVAR] [record=C.jsonl] [replay=C.jsonl] [retries=0-3]
+                               # HTTP GET JSON; auto-pagination; SSRF guard + DNS pin;
+                               # auth=ENVVAR -> Bearer dari env (secret tak pernah di-log);
+                               # record/replay = JSONL cache (offline deterministik);
+                               # retries = 0..3 dgn backoff
 post URL [undo_method=DELETE] [undo_url=URL]   # butuh --approve; body = pipeline data
 read FILE | write FILE | append FILE    # path-sandboxed ke working dir
 filter FIELD=VALUE             # string equality
@@ -55,6 +59,7 @@ checkpoint [save=FILE]         # rollback point; save= = world-state lintas sesi
 undo [checkpoint=N]            # revert mutasi sejak checkpoint (file byte-per-byte, API = real HTTP)
 resume FILE                    # restore world-state di sesi baru
 ask QUESTION                   # human gate: exit 2 + {"needs_human": true}
+sort [FIELD] [desc=1] | limit N | head N | tail N | uniq [FIELD] | group FIELD | count | regex FIELD=PATTERN | join FIELD
 ```
 
 **Parsing contract:** value yang mengandung `=`, `>`, `<`, `|` WAJIB di-quote: `filter x="a>b"`. Inline pipe boleh: `read f.json|pick n` = `read f.json | pick n`.
