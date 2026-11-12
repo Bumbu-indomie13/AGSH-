@@ -2,7 +2,7 @@
 
 ![CI](https://github.com/Bumbu-indomie13/AGSH-/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Tests](https://img.shields.io/badge/tests-114%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-116%20passing-brightgreen)
 ![Python](https://img.shields.io/badge/python-3.10%2B-informational)
 ![Dependencies](https://img.shields.io/badge/dependencies-zero-9cf)
 
@@ -98,7 +98,7 @@ All enforced by the **runtime**, not by model obedience:
 
 ```bash
 python3 tests.py              # 70 checks: sandbox escapes, SSRF, DNS pin, undo, scale, determinism...
-for t in test_*.py; do python3 $t.py; done   # +44 feature checks (auth-env, record/replay,
+for t in test_*.py; do python3 $t.py; done   # +46 feature checks (auth-env, record/replay,
                                              # plan-redact, audit-all, relational filter, llm verbs)
 ```
 
