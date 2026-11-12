@@ -52,7 +52,9 @@ def parse_stage(toks):
     verb, subject, kwargs = None, None, {}
     toks = [t for t in toks if t != "|"]  # continuation-pipe marker
     for i, t in enumerate(toks):
-        if "=" in t and i > 0 and not re.search(r"(>=|<=|==|>|<)", t):
+        if "==" in t and i > 1:
+            pass  # equality op inside subject — never kwargs (PR-2: shadowing reorder)
+        elif "=" in t and i > 0 and not re.search(r"(>=|<=|==|>|<)", t):
             k, v = t.split("=", 1)
             kwargs[k] = v
         elif i == 0:
@@ -414,6 +416,13 @@ class Runtime:
         if kw:
             k, v = next(iter(kw.items()))
             _res = [x for x in data if isinstance(x, dict) and str(x.get(k)) == v]
+            self.audit("filter", (subject or "")[:120], "ok", {"out": len(_res) if isinstance(_res, list) else None})  # audit-all-stages
+            return _res
+        # equality form: filter FIELD == VALUE — string equality (PR-2, DeryClaw)
+        m = re.fullmatch(r"([A-Za-z_]\w*)\s*==\s*(.+)", (subject or "").strip())
+        if m:
+            f, val = m.group(1), m.group(2).strip().strip("\"'")
+            _res = [x for x in data if isinstance(x, dict) and str(x.get(f)) == val]
             self.audit("filter", (subject or "")[:120], "ok", {"out": len(_res) if isinstance(_res, list) else None})  # audit-all-stages
             return _res
         if subject.startswith("email ends-with"):
