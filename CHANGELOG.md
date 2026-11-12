@@ -5,6 +5,9 @@ All notable changes to AGSH. Dates are 2026 (project started Nov 2026).
 ## [0.7] — 2026-11-12
 
 ### Added
+- **Official MCP server** `mcp/agsh_mcp.py` (backlog #5): zero-dependency stdio JSON-RPC server exposing `agsh_execute` with the plan-first approval contract baked in; live-tested (initialize/tools/list/tools/call, pure plan vs gated `run`)
+- **Governance pack** (backlog #8): CONTRIBUTING.md (PR workflow, kitchen-sink scope rules, verb checklist, attribution, security-report policy), CODEOWNERS, PR template
+- ARTICLE.md — adoption essay ("Why your AI agent keeps re-sending 40 tokens…")
 - `lease NAME [ttl=S]` cross-run coordination verb (backlog #2): flock-backed advisory lease, structured contention error, stale-lease stealing (dead PID past ttl), host `--wait N` retry window; released at run end (success or error)
 - `schema SPEC` inter-stage shape contracts (backlog #4): recursive spec grammar (`list[dict[id:num,name:str]]`), errors carry the exact path of the first mismatch
 - unittest suite in CI (8th suite); `header=NAME:VALUE` documented on fetch/post

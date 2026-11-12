@@ -129,6 +129,26 @@ pip install tiktoken && python3 benchmark.py
 
 Wrap the interpreter as one tool (`agsh_execute(script, flags, plan_first=True)`) and give the agent [AGENT-GUIDE.md](AGENT-GUIDE.md) — it covers the plan→approve→execute loop, the flag rules ("the model never adds approval flags itself"), and the verb cheat-sheet. A working example lives in the guide (§10).
 
+## Official MCP server (adoption)
+
+AGSH ships a zero-dependency [Model Context Protocol](https://modelcontextprotocol.io) server — wire it into any MCP client (Claude Desktop, Hermes, Cursor, …):
+
+```json
+{ "agsh": { "command": "python3", "args": ["/path/to/AGSH-/mcp/agsh_mcp.py"] } }
+```
+
+One tool, `agsh_execute(script, flags, plan_first)`. The server enforces the
+**plan-first contract**: default `plan_first=true` returns the dry-run plan with
+an `approval_required` marker; only an explicit second call with
+`plan_first=false` (plus host flags like `--approve`, `--allow-run=…`) executes.
+The dangerous path can never happen by accident.
+
+## Governance (adoption)
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) — PR workflow + the **kitchen-sink guard**: every verb must ship RISK + SPEC + guide + tests + changelog, and scope rules say what gets *declined*
+- `CODEOWNERS` — maintainer review on all changes; pair with branch protection (require PR)
+- PR template with the verb checklist baked in
+
 ## Status
 
 ~500 lines, stdlib-only Python, interpreter + 7 test files, all security backlogs closed. See [CHANGELOG.md](CHANGELOG.md) for the full history.

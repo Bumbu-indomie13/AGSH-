@@ -1,0 +1,4 @@
+# Default: everything owned by the maintainer. Direct pushes to main by
+# non-owners will be rejected once branch protection is enabled
+# (Settings → Branches → main: require PR + this CODEOWNERS review).
+* @Bumbu-indomie13
