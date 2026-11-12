@@ -1,0 +1,10 @@
+LICENSE
+README.md
+agsh.py
+pyproject.toml
+agsh.egg-info/PKG-INFO
+agsh.egg-info/SOURCES.txt
+agsh.egg-info/dependency_links.txt
+agsh.egg-info/entry_points.txt
+agsh.egg-info/requires.txt
+agsh.egg-info/top_level.txt
