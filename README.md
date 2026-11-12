@@ -149,6 +149,10 @@ The dangerous path can never happen by accident.
 - `CODEOWNERS` — maintainer review on all changes; pair with branch protection (require PR)
 - PR template with the verb checklist baked in
 
+## vs code-as-action (smolagents-style): measured, not claimed
+
+[POSITIONING.md](POSITIONING.md) runs the same 6 tasks through **both** artifacts for real ([bench/bench_vs_code.py](bench/bench_vs_code.py)): **AGSH 127 emitted tokens vs Python 359 (2.83x), 6 vs 12 agent round-trips**, both 6/6 executed+verified — plus the structural case: a scannable plan + structural audit vs reviewing generated Turing-complete code, and small-model compliance (a 3B model wrote valid AGSH 10/10; a larger model 10/20). Fair-comparison rules included: tasks where Python wins are named (expressiveness — that's what the `run` escape hatch composes with).
+
 ## Status
 
 ~500 lines, stdlib-only Python, interpreter + 7 test files, all security backlogs closed. See [CHANGELOG.md](CHANGELOG.md) for the full history.
